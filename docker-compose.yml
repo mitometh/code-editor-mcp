@@ -1,6 +1,6 @@
 services:
   file-server:
-    build: .
+    build: ./server
     ports:
       - "${API_PORT:-8000}:${API_PORT:-8000}"
     environment:

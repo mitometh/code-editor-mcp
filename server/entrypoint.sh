@@ -19,7 +19,7 @@ else
 fi
 
 echo "==> Starting FastAPI server on port ${API_PORT}"
-exec uvicorn api:app \
+exec uvicorn app.main:app \
     --host 0.0.0.0 \
     --port "${API_PORT}" \
     --workers 1

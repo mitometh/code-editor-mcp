@@ -7,76 +7,24 @@ Resources: workspace://<path>  — any file in the remote workspace
            workspace://CLAUDE.md — project instructions (auto-browsable)
 
 Run with:
-    python mcp_server.py
+    python mcp/server.py
 
 Register in .mcp.json (stdio transport):
     {
       "command": "python3.13",
-      "args": ["/path/to/mcp_server.py"],
+      "args": ["/path/to/mcp/server.py"],
       "env": { "CONTAINER_BASE_URL": "http://localhost:8000" }
     }
 """
 
-import json
-import os
 from typing import Optional
 
 import httpx
 from mcp.server.fastmcp import FastMCP
 
-BASE_URL = os.environ.get("CONTAINER_BASE_URL", "http://localhost:8000").rstrip("/")
+from http_client import BASE_URL, _get, _post, _delete
 
 mcp = FastMCP("remote-file-editor")
-
-
-# ── HTTP helpers ──────────────────────────────────────────────────────────────
-
-def _get(endpoint: str, **params) -> str:
-    try:
-        r = httpx.get(f"{BASE_URL}{endpoint}", params={k: v for k, v in params.items() if v is not None}, timeout=60)
-        r.raise_for_status()
-        return r.text
-    except httpx.HTTPStatusError as e:
-        return f"ERROR {e.response.status_code}: {e.response.text}"
-    except Exception as e:
-        return f"ERROR: {e}"
-
-
-def _post(endpoint: str, payload: dict) -> str:
-    try:
-        r = httpx.post(f"{BASE_URL}{endpoint}", json=payload, timeout=120)
-        r.raise_for_status()
-        data = r.json()
-        # Prefer "output" key (Grep/Bash), then "message", then full JSON
-        return data.get("output") or data.get("message") or json.dumps(data)
-    except httpx.HTTPStatusError as e:
-        return f"ERROR {e.response.status_code}: {e.response.text}"
-    except Exception as e:
-        return f"ERROR: {e}"
-
-
-def _delete(endpoint: str, **params) -> str:
-    try:
-        r = httpx.delete(f"{BASE_URL}{endpoint}", params=params, timeout=30)
-        r.raise_for_status()
-        return r.json().get("message", "Done")
-    except httpx.HTTPStatusError as e:
-        return f"ERROR {e.response.status_code}: {e.response.text}"
-    except Exception as e:
-        return f"ERROR: {e}"
-
-
-def _post_list(endpoint: str, payload: dict, key: str) -> str:
-    """POST that returns a JSON array under `key`, formatted one item per line."""
-    try:
-        r = httpx.post(f"{BASE_URL}{endpoint}", json=payload, timeout=60)
-        r.raise_for_status()
-        items = r.json().get(key, [])
-        return "\n".join(items) if items else "(no matches)"
-    except httpx.HTTPStatusError as e:
-        return f"ERROR {e.response.status_code}: {e.response.text}"
-    except Exception as e:
-        return f"ERROR: {e}"
 
 
 # ── Tools ─────────────────────────────────────────────────────────────────────
@@ -97,7 +45,7 @@ def Read(
         offset: 1-based line number to start reading from.
         limit: Maximum number of lines to return.
     """
-    return _get("/read_file", file_path=file_path, offset=offset, limit=limit)
+    return _get("/file/read_file", file_path=file_path, offset=offset, limit=limit)
 
 
 @mcp.tool()
@@ -110,7 +58,7 @@ def Write(file_path: str, content: str) -> str:
         file_path: Path relative to /workspace.
         content: The complete new content of the file.
     """
-    return _post("/write_file", {"file_path": file_path, "content": content})
+    return _post("/file/write_file", {"file_path": file_path, "content": content})
 
 
 @mcp.tool()
@@ -131,7 +79,7 @@ def Edit(
         new_string: The replacement string.
         replace_all: If true, replace every occurrence instead of requiring uniqueness.
     """
-    return _post("/edit", {
+    return _post("/file/edit", {
         "file_path": file_path,
         "old_string": old_string,
         "new_string": new_string,
@@ -150,9 +98,9 @@ def Glob(pattern: str, path: str = "") -> str:
         path: Subdirectory to search in (relative to /workspace). Defaults to workspace root.
     """
     try:
-        r = httpx.get(f"{BASE_URL}/glob", params={"pattern": pattern, "path": path}, timeout=30)
-        r.raise_for_status()
-        matches = r.json().get("matches", [])
+        data = httpx.get(f"{BASE_URL}/file/glob", params={"pattern": pattern, "path": path}, timeout=30)
+        data.raise_for_status()
+        matches = data.json().get("matches", [])
         return "\n".join(matches) if matches else "(no matches)"
     except httpx.HTTPStatusError as e:
         return f"ERROR {e.response.status_code}: {e.response.text}"
@@ -189,7 +137,7 @@ def Grep(
         head_limit: Return only the first N results.
         multiline: Allow . to match newlines; patterns can span lines.
     """
-    return _post("/grep", {
+    return _post("/file/grep", {
         "pattern": pattern,
         "path": path,
         "glob": glob,
@@ -213,7 +161,7 @@ def Bash(command: str, timeout: int = 120000) -> str:
         command: Shell command to run (executed via /bin/sh -c).
         timeout: Timeout in milliseconds (default 120 000 = 2 minutes).
     """
-    return _post("/bash", {"command": command, "timeout": timeout})
+    return _post("/file/bash", {"command": command, "timeout": timeout})
 
 
 @mcp.tool()
@@ -225,7 +173,7 @@ def LS(path: str = "") -> str:
         path: Directory path relative to /workspace. Defaults to workspace root.
     """
     try:
-        r = httpx.get(f"{BASE_URL}/list_directory", params={"path": path}, timeout=30)
+        r = httpx.get(f"{BASE_URL}/file/list_directory", params={"path": path}, timeout=30)
         r.raise_for_status()
         data = r.json()
         lines = [f"/{data['path']}:"]
@@ -248,7 +196,7 @@ def DeleteFile(file_path: str) -> str:
     Args:
         file_path: Path relative to /workspace.
     """
-    return _delete("/delete_file", file_path=file_path)
+    return _delete("/file/delete_file", file_path=file_path)
 
 
 @mcp.tool()
@@ -260,7 +208,7 @@ def MoveFile(source: str, destination: str) -> str:
         source: Current path relative to /workspace.
         destination: Target path relative to /workspace.
     """
-    return _post("/move_file", {"source": source, "destination": destination})
+    return _post("/file/move_file", {"source": source, "destination": destination})
 
 
 # ── Git tools ─────────────────────────────────────────────────────────────────
@@ -327,9 +275,11 @@ def GitLog(
         oneline: Compact one-line format showing hash + subject only.
     """
     try:
-        r = httpx.get(f"{BASE_URL}/git/log",
-                      params={"max_count": max_count, "path": path, "ref": ref, "oneline": oneline},
-                      timeout=15)
+        r = httpx.get(
+            f"{BASE_URL}/git/log",
+            params={"max_count": max_count, "path": path, "ref": ref, "oneline": oneline},
+            timeout=15,
+        )
         r.raise_for_status()
         data = r.json()
         if "log" in data:
@@ -359,9 +309,11 @@ def GitTree(path: str = "", ref: str = "HEAD") -> str:
         ref: Commit, branch, or tag to read the tree from (default HEAD).
     """
     try:
-        r = httpx.get(f"{BASE_URL}/git/tree",
-                      params={"path": path, "ref": ref, "recursive": True},
-                      timeout=15)
+        r = httpx.get(
+            f"{BASE_URL}/git/tree",
+            params={"path": path, "ref": ref, "recursive": True},
+            timeout=15,
+        )
         r.raise_for_status()
         files = r.json().get("files", [])
         return "\n".join(files) if files else "(empty tree)"
@@ -421,12 +373,109 @@ def GitBranches(all: bool = False) -> str:
         return f"ERROR: {e}"
 
 
+@mcp.tool()
+def GitAdd(paths: list[str] = None) -> str:
+    """
+    Stage files for the next commit.
+
+    Args:
+        paths: List of file paths to stage (relative to /workspace). Defaults to ["."] (everything).
+    """
+    return _post("/git/add", {"paths": paths or ["."]})
+
+
+@mcp.tool()
+def GitCommit(message: str, author: str = "") -> str:
+    """
+    Create a commit with the currently staged changes.
+
+    Args:
+        message: Commit message.
+        author: Optional author override in "Name <email>" format.
+    """
+    return _post("/git/commit", {"message": message, "author": author})
+
+
+@mcp.tool()
+def GitCheckout(ref: str, create: bool = False) -> str:
+    """
+    Switch to a branch or commit, optionally creating a new branch.
+
+    Args:
+        ref: Branch name, tag, or commit hash to check out.
+        create: If true, create the branch (-b flag).
+    """
+    return _post("/git/checkout", {"ref": ref, "create": create})
+
+
+@mcp.tool()
+def GitPush(remote: str = "origin", branch: str = "", force: bool = False) -> str:
+    """
+    Push commits to a remote repository.
+
+    Args:
+        remote: Remote name (default "origin").
+        branch: Branch to push (default: current branch).
+        force: Use --force-with-lease instead of a normal push.
+    """
+    return _post("/git/push", {"remote": remote, "branch": branch, "force": force})
+
+
+@mcp.tool()
+def GitPull(remote: str = "origin", branch: str = "") -> str:
+    """
+    Pull and merge changes from a remote repository.
+
+    Args:
+        remote: Remote name (default "origin").
+        branch: Branch to pull (default: tracking branch).
+    """
+    return _post("/git/pull", {"remote": remote, "branch": branch})
+
+
+@mcp.tool()
+def GitFetch(remote: str = "origin", prune: bool = False) -> str:
+    """
+    Fetch changes from a remote without merging.
+
+    Args:
+        remote: Remote name (default "origin").
+        prune: Remove remote-tracking branches that no longer exist on the remote.
+    """
+    return _post("/git/fetch", {"remote": remote, "prune": prune})
+
+
+@mcp.tool()
+def GitStash(action: str = "push", message: str = "") -> str:
+    """
+    Save or restore stashed working tree changes.
+
+    Args:
+        action: One of push | pop | list | drop (default "push").
+        message: Optional description when action is "push".
+    """
+    return _post("/git/stash", {"action": action, "message": message})
+
+
+@mcp.tool()
+def GitReset(ref: str = "HEAD", mode: str = "mixed", paths: list[str] = None) -> str:
+    """
+    Reset HEAD or unstage specific files.
+
+    Args:
+        ref: Commit to reset to (default "HEAD").
+        mode: soft | mixed | hard — ignored when paths are provided.
+        paths: If provided, unstage only these specific files.
+    """
+    return _post("/git/reset", {"ref": ref, "mode": mode, "paths": paths or []})
+
+
 # ── Resources (workspace files as MCP resources) ──────────────────────────────
 
 @mcp.resource("workspace://CLAUDE.md")
 def claude_md_resource() -> str:
     """Project instructions from CLAUDE.md in the remote workspace."""
-    content = _get("/read_file", file_path="CLAUDE.md")
+    content = _get("/file/read_file", file_path="CLAUDE.md")
     if "ERROR 404" in content:
         return "(No CLAUDE.md found in the remote workspace)"
     return content
@@ -439,7 +488,7 @@ def workspace_file_resource(path: str) -> str:
     URI format: workspace://<path-relative-to-workspace>
     Example:    workspace://src/main.py
     """
-    return _get("/read_file", file_path=path)
+    return _get("/file/read_file", file_path=path)
 
 
 # ── GetProjectContext ──────────────────────────────────────────────────────────
@@ -460,28 +509,27 @@ def GetProjectContext() -> str:
 
     # ── CLAUDE.md ─────────────────────────────────────────────────────────────
     for candidate in ("CLAUDE.md", "claude.md", ".claude/CLAUDE.md"):
-        content = _get("/read_file", file_path=candidate)
+        content = _get("/file/read_file", file_path=candidate)
         if not content.startswith("ERROR"):
             sections.append(f"=== {candidate} ===\n{content}")
             break
 
     # ── .claude/settings.json ─────────────────────────────────────────────────
-    content = _get("/read_file", file_path=".claude/settings.json")
+    content = _get("/file/read_file", file_path=".claude/settings.json")
     if not content.startswith("ERROR"):
         sections.append(f"=== .claude/settings.json ===\n{content}")
 
     # ── .mcp.json ─────────────────────────────────────────────────────────────
-    content = _get("/read_file", file_path=".mcp.json")
+    content = _get("/file/read_file", file_path=".mcp.json")
     if not content.startswith("ERROR"):
         sections.append(f"=== .mcp.json ===\n{content}")
 
     # ── .claude/commands/*.md  (custom slash commands) ────────────────────────
     try:
-        r = httpx.get(f"{BASE_URL}/glob",
-                      params={"pattern": ".claude/commands/*.md"}, timeout=10)
+        r = httpx.get(f"{BASE_URL}/file/glob", params={"pattern": ".claude/commands/*.md"}, timeout=10)
         if r.status_code == 200:
             for cmd_path in r.json().get("matches", []):
-                content = _get("/read_file", file_path=cmd_path)
+                content = _get("/file/read_file", file_path=cmd_path)
                 if not content.startswith("ERROR"):
                     sections.append(f"=== {cmd_path} ===\n{content}")
     except Exception:

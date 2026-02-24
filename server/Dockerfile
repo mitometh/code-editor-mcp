@@ -7,10 +7,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends git \
 WORKDIR /app
 
 # Install Python dependencies
-RUN pip install --no-cache-dir fastapi uvicorn[standard]
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the API server
-COPY api.py .
+# Copy application code and static assets
+COPY app/ app/
+COPY static/ static/
 
 # Entrypoint: clone the repo, then start the server
 COPY entrypoint.sh .
