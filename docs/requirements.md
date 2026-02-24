@@ -73,7 +73,6 @@ Everything driven by environment variables, no hardcoded values:
 
 - Authentication / API keys on the HTTP server
 - Private GitHub repo support (public repo only)
-- Git operations from the agent (commit, push, pull)
 - Remote code execution
 - Multi-agent / concurrent access
 
@@ -91,7 +90,8 @@ All via MCP tool calls, with the file changes visible inside the running Docker 
 
 ## Deliverables
 
-- `Dockerfile` + `docker-compose.yml`
-- `api.py` — FastAPI file server
-- `mcp_server.py` — MCP server with tool definitions
+- `server/Dockerfile` + `docker-compose.yml`
+- `server/app/` — FastAPI file server (files and git routes)
+- `mcp/server.py` — MCP server with tool definitions
+- `mcp/http_client.py` — HTTP transport layer
 - `README.md` — setup and run instructions
