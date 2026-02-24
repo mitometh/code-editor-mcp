@@ -1,0 +1,340 @@
+"""
+MCP Server — remote workspace tools that mirror Claude Code's built-in tools.
+
+Tools:    Read, Write, Edit, Glob, Grep, Bash, LS, DeleteFile, MoveFile,
+          GetProjectContext
+Resources: workspace://<path>  — any file in the remote workspace
+           workspace://CLAUDE.md — project instructions (auto-browsable)
+
+Run with:
+    python mcp_server.py
+
+Register in .mcp.json (stdio transport):
+    {
+      "command": "python3.13",
+      "args": ["/path/to/mcp_server.py"],
+      "env": { "CONTAINER_BASE_URL": "http://localhost:8000" }
+    }
+"""
+
+import json
+import os
+from typing import Optional
+
+import httpx
+from mcp.server.fastmcp import FastMCP
+
+BASE_URL = os.environ.get("CONTAINER_BASE_URL", "http://localhost:8000").rstrip("/")
+
+mcp = FastMCP("remote-file-editor")
+
+
+# ── HTTP helpers ──────────────────────────────────────────────────────────────
+
+def _get(endpoint: str, **params) -> str:
+    try:
+        r = httpx.get(f"{BASE_URL}{endpoint}", params={k: v for k, v in params.items() if v is not None}, timeout=60)
+        r.raise_for_status()
+        return r.text
+    except httpx.HTTPStatusError as e:
+        return f"ERROR {e.response.status_code}: {e.response.text}"
+    except Exception as e:
+        return f"ERROR: {e}"
+
+
+def _post(endpoint: str, payload: dict) -> str:
+    try:
+        r = httpx.post(f"{BASE_URL}{endpoint}", json=payload, timeout=120)
+        r.raise_for_status()
+        data = r.json()
+        # Prefer "output" key (Grep/Bash), then "message", then full JSON
+        return data.get("output") or data.get("message") or json.dumps(data)
+    except httpx.HTTPStatusError as e:
+        return f"ERROR {e.response.status_code}: {e.response.text}"
+    except Exception as e:
+        return f"ERROR: {e}"
+
+
+def _delete(endpoint: str, **params) -> str:
+    try:
+        r = httpx.delete(f"{BASE_URL}{endpoint}", params=params, timeout=30)
+        r.raise_for_status()
+        return r.json().get("message", "Done")
+    except httpx.HTTPStatusError as e:
+        return f"ERROR {e.response.status_code}: {e.response.text}"
+    except Exception as e:
+        return f"ERROR: {e}"
+
+
+def _post_list(endpoint: str, payload: dict, key: str) -> str:
+    """POST that returns a JSON array under `key`, formatted one item per line."""
+    try:
+        r = httpx.post(f"{BASE_URL}{endpoint}", json=payload, timeout=60)
+        r.raise_for_status()
+        items = r.json().get(key, [])
+        return "\n".join(items) if items else "(no matches)"
+    except httpx.HTTPStatusError as e:
+        return f"ERROR {e.response.status_code}: {e.response.text}"
+    except Exception as e:
+        return f"ERROR: {e}"
+
+
+# ── Tools ─────────────────────────────────────────────────────────────────────
+
+@mcp.tool()
+def Read(
+    file_path: str,
+    offset: Optional[int] = None,
+    limit: Optional[int] = None,
+) -> str:
+    """
+    Read a file from the remote workspace.
+    Returns content with line numbers in the format used by Claude Code (     1→...).
+    By default reads the whole file; use offset/limit to read a slice.
+
+    Args:
+        file_path: Path relative to /workspace (e.g. "src/main.py").
+        offset: 1-based line number to start reading from.
+        limit: Maximum number of lines to return.
+    """
+    return _get("/read_file", file_path=file_path, offset=offset, limit=limit)
+
+
+@mcp.tool()
+def Write(file_path: str, content: str) -> str:
+    """
+    Create or fully overwrite a file in the remote workspace.
+    Missing parent directories are created automatically.
+
+    Args:
+        file_path: Path relative to /workspace.
+        content: The complete new content of the file.
+    """
+    return _post("/write_file", {"file_path": file_path, "content": content})
+
+
+@mcp.tool()
+def Edit(
+    file_path: str,
+    old_string: str,
+    new_string: str,
+    replace_all: bool = False,
+) -> str:
+    """
+    Perform an exact string replacement in a file in the remote workspace.
+    By default requires old_string to appear exactly once (safe targeted edit).
+    Set replace_all=true to replace every occurrence.
+
+    Args:
+        file_path: Path relative to /workspace.
+        old_string: The exact string to find. Must match exactly once unless replace_all=true.
+        new_string: The replacement string.
+        replace_all: If true, replace every occurrence instead of requiring uniqueness.
+    """
+    return _post("/edit", {
+        "file_path": file_path,
+        "old_string": old_string,
+        "new_string": new_string,
+        "replace_all": replace_all,
+    })
+
+
+@mcp.tool()
+def Glob(pattern: str, path: str = "") -> str:
+    """
+    Find files in the remote workspace matching a glob pattern.
+    Results are sorted by modification time (most recent first).
+
+    Args:
+        pattern: Glob pattern relative to the search root, e.g. "**/*.py" or "src/**/*.ts".
+        path: Subdirectory to search in (relative to /workspace). Defaults to workspace root.
+    """
+    try:
+        r = httpx.get(f"{BASE_URL}/glob", params={"pattern": pattern, "path": path}, timeout=30)
+        r.raise_for_status()
+        matches = r.json().get("matches", [])
+        return "\n".join(matches) if matches else "(no matches)"
+    except httpx.HTTPStatusError as e:
+        return f"ERROR {e.response.status_code}: {e.response.text}"
+    except Exception as e:
+        return f"ERROR: {e}"
+
+
+@mcp.tool()
+def Grep(
+    pattern: str,
+    path: str = "",
+    glob: str = "",
+    output_mode: str = "files_with_matches",
+    context: int = 0,
+    case_insensitive: bool = False,
+    line_numbers: bool = True,
+    head_limit: int = 0,
+    multiline: bool = False,
+) -> str:
+    """
+    Search file contents in the remote workspace using a regular expression.
+
+    Args:
+        pattern: Regular expression to search for.
+        path: File or directory to search (relative to /workspace). Defaults to workspace root.
+        glob: Glob pattern to filter which files are searched, e.g. "*.py".
+        output_mode: One of:
+            "files_with_matches" (default) — list of matching file paths,
+            "content"  — matching lines with optional context,
+            "count"    — match count per file.
+        context: Lines of context to show before and after each match (content mode).
+        case_insensitive: Case-insensitive matching.
+        line_numbers: Prefix matching lines with line numbers (content mode).
+        head_limit: Return only the first N results.
+        multiline: Allow . to match newlines; patterns can span lines.
+    """
+    return _post("/grep", {
+        "pattern": pattern,
+        "path": path,
+        "glob": glob,
+        "output_mode": output_mode,
+        "context": context,
+        "case_insensitive": case_insensitive,
+        "line_numbers": line_numbers,
+        "head_limit": head_limit,
+        "multiline": multiline,
+    })
+
+
+@mcp.tool()
+def Bash(command: str, timeout: int = 120000) -> str:
+    """
+    Execute a shell command inside the remote workspace container.
+    Always runs from /workspace — all file access is scoped to that directory.
+    stdout and stderr are returned together.
+
+    Args:
+        command: Shell command to run (executed via /bin/sh -c).
+        timeout: Timeout in milliseconds (default 120 000 = 2 minutes).
+    """
+    return _post("/bash", {"command": command, "timeout": timeout})
+
+
+@mcp.tool()
+def LS(path: str = "") -> str:
+    """
+    List files and subdirectories in a directory of the remote workspace.
+
+    Args:
+        path: Directory path relative to /workspace. Defaults to workspace root.
+    """
+    try:
+        r = httpx.get(f"{BASE_URL}/list_directory", params={"path": path}, timeout=30)
+        r.raise_for_status()
+        data = r.json()
+        lines = [f"/{data['path']}:"]
+        for e in data["entries"]:
+            tag = "[DIR]" if e["type"] == "directory" else "     "
+            size = f"  ({e['size']} B)" if e["size"] is not None else ""
+            lines.append(f"  {tag}  {e['name']}{size}")
+        return "\n".join(lines)
+    except httpx.HTTPStatusError as e:
+        return f"ERROR {e.response.status_code}: {e.response.text}"
+    except Exception as e:
+        return f"ERROR: {e}"
+
+
+@mcp.tool()
+def DeleteFile(file_path: str) -> str:
+    """
+    Delete a file or directory (recursively) from the remote workspace.
+
+    Args:
+        file_path: Path relative to /workspace.
+    """
+    return _delete("/delete_file", file_path=file_path)
+
+
+@mcp.tool()
+def MoveFile(source: str, destination: str) -> str:
+    """
+    Move or rename a file or directory within the remote workspace.
+
+    Args:
+        source: Current path relative to /workspace.
+        destination: Target path relative to /workspace.
+    """
+    return _post("/move_file", {"source": source, "destination": destination})
+
+
+# ── Resources (workspace files as MCP resources) ──────────────────────────────
+
+@mcp.resource("workspace://CLAUDE.md")
+def claude_md_resource() -> str:
+    """Project instructions from CLAUDE.md in the remote workspace."""
+    content = _get("/read_file", file_path="CLAUDE.md")
+    if "ERROR 404" in content:
+        return "(No CLAUDE.md found in the remote workspace)"
+    return content
+
+
+@mcp.resource("workspace://{path}")
+def workspace_file_resource(path: str) -> str:
+    """
+    Any file from the remote workspace, readable as a resource.
+    URI format: workspace://<path-relative-to-workspace>
+    Example:    workspace://src/main.py
+    """
+    return _get("/read_file", file_path=path)
+
+
+# ── GetProjectContext ──────────────────────────────────────────────────────────
+
+@mcp.tool()
+def GetProjectContext() -> str:
+    """
+    Load all Claude Code config files from the remote workspace into context.
+    Call this once at the start of a session before doing any work.
+
+    Fetches (if present):
+      - CLAUDE.md                    project-level instructions for the agent
+      - .claude/settings.json        project-level Claude Code settings
+      - .claude/commands/*.md        custom slash-command definitions
+      - .mcp.json                    MCP server config declared by the project
+    """
+    sections: list[str] = []
+
+    # ── CLAUDE.md ─────────────────────────────────────────────────────────────
+    for candidate in ("CLAUDE.md", "claude.md", ".claude/CLAUDE.md"):
+        content = _get("/read_file", file_path=candidate)
+        if not content.startswith("ERROR"):
+            sections.append(f"=== {candidate} ===\n{content}")
+            break
+
+    # ── .claude/settings.json ─────────────────────────────────────────────────
+    content = _get("/read_file", file_path=".claude/settings.json")
+    if not content.startswith("ERROR"):
+        sections.append(f"=== .claude/settings.json ===\n{content}")
+
+    # ── .mcp.json ─────────────────────────────────────────────────────────────
+    content = _get("/read_file", file_path=".mcp.json")
+    if not content.startswith("ERROR"):
+        sections.append(f"=== .mcp.json ===\n{content}")
+
+    # ── .claude/commands/*.md  (custom slash commands) ────────────────────────
+    try:
+        r = httpx.get(f"{BASE_URL}/glob",
+                      params={"pattern": ".claude/commands/*.md"}, timeout=10)
+        if r.status_code == 200:
+            for cmd_path in r.json().get("matches", []):
+                content = _get("/read_file", file_path=cmd_path)
+                if not content.startswith("ERROR"):
+                    sections.append(f"=== {cmd_path} ===\n{content}")
+    except Exception:
+        pass
+
+    if not sections:
+        return "No Claude Code config files found in the remote workspace."
+    return "\n\n".join(sections)
+
+
+# ── Entry point ───────────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    mcp.run(transport="stdio")

@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "remote-file-editor": {
+      "command": "python3.13",
+      "args": ["/Users/tuanva/Desktop/docker-poc/mcp_server.py"],
+      "env": {
+        "CONTAINER_BASE_URL": "http://localhost:8000"
+      }
+    }
+  }
+}
