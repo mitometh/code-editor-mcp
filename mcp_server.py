@@ -263,6 +263,164 @@ def MoveFile(source: str, destination: str) -> str:
     return _post("/move_file", {"source": source, "destination": destination})
 
 
+# ── Git tools ─────────────────────────────────────────────────────────────────
+
+@mcp.tool()
+def GitStatus() -> str:
+    """
+    Show the working tree status of the remote workspace repository.
+    Returns staged, unstaged, and untracked files with their XY status codes.
+
+    Status codes: M=modified  A=added  D=deleted  R=renamed  ?=untracked  !=ignored
+    """
+    try:
+        r = httpx.get(f"{BASE_URL}/git/status", timeout=15)
+        r.raise_for_status()
+        data = r.json()
+        if not data["files"]:
+            return "Nothing to commit, working tree clean."
+        lines = []
+        for f in data["files"]:
+            orig = f"  (was {f['orig_path']})" if "orig_path" in f else ""
+            lines.append(f"  {f['xy']}  {f['path']}{orig}")
+        return "\n".join(lines)
+    except httpx.HTTPStatusError as e:
+        return f"ERROR {e.response.status_code}: {e.response.text}"
+    except Exception as e:
+        return f"ERROR: {e}"
+
+
+@mcp.tool()
+def GitDiff(
+    path: str = "",
+    ref: str = "",
+    staged: bool = False,
+    stat: bool = False,
+) -> str:
+    """
+    Show a unified diff of changes in the remote workspace.
+
+    Args:
+        path: Restrict the diff to a specific file or directory.
+        ref: Compare against this ref (branch, tag, or commit hash).
+             Examples: "HEAD", "main", "abc1234", "HEAD~3"
+        staged: Show staged (indexed) changes instead of unstaged.
+        stat: Show a diffstat summary (changed files + line counts) instead of the full patch.
+    """
+    return _get("/git/diff", path=path, ref=ref, staged=staged, stat=stat)
+
+
+@mcp.tool()
+def GitLog(
+    max_count: int = 20,
+    path: str = "",
+    ref: str = "HEAD",
+    oneline: bool = False,
+) -> str:
+    """
+    Show the commit history of the remote workspace repository.
+
+    Args:
+        max_count: Maximum number of commits to return (default 20, max 500).
+        path: Only show commits that touched this file or directory.
+        ref: Start from this branch, tag, or commit (default HEAD).
+        oneline: Compact one-line format showing hash + subject only.
+    """
+    try:
+        r = httpx.get(f"{BASE_URL}/git/log",
+                      params={"max_count": max_count, "path": path, "ref": ref, "oneline": oneline},
+                      timeout=15)
+        r.raise_for_status()
+        data = r.json()
+        if "log" in data:
+            return data["log"] or "(no commits)"
+        commits = data.get("commits", [])
+        if not commits:
+            return "(no commits)"
+        lines = []
+        for c in commits:
+            lines.append(f"{c['hash'][:8]}  {c['date'][:10]}  {c['author']}")
+            lines.append(f"          {c['subject']}")
+        return "\n".join(lines)
+    except httpx.HTTPStatusError as e:
+        return f"ERROR {e.response.status_code}: {e.response.text}"
+    except Exception as e:
+        return f"ERROR: {e}"
+
+
+@mcp.tool()
+def GitTree(path: str = "", ref: str = "HEAD") -> str:
+    """
+    List all files tracked by git at a given ref — a full git-aware file tree.
+    Unlike LS, this shows every tracked file recursively (ignoring untracked files).
+
+    Args:
+        path: Subdirectory to restrict the listing to.
+        ref: Commit, branch, or tag to read the tree from (default HEAD).
+    """
+    try:
+        r = httpx.get(f"{BASE_URL}/git/tree",
+                      params={"path": path, "ref": ref, "recursive": True},
+                      timeout=15)
+        r.raise_for_status()
+        files = r.json().get("files", [])
+        return "\n".join(files) if files else "(empty tree)"
+    except httpx.HTTPStatusError as e:
+        return f"ERROR {e.response.status_code}: {e.response.text}"
+    except Exception as e:
+        return f"ERROR: {e}"
+
+
+@mcp.tool()
+def GitShow(path: str, ref: str = "HEAD") -> str:
+    """
+    Read the content of a file as it existed at a specific git ref.
+    Returns the file with line numbers (same format as Read).
+    Useful for comparing the current version against a past commit.
+
+    Args:
+        path: File path relative to /workspace.
+        ref: Commit hash, branch, or tag (default HEAD).
+             Examples: "HEAD", "main", "HEAD~1", "abc1234"
+    """
+    return _get("/git/show", path=path, ref=ref, line_numbers=True)
+
+
+@mcp.tool()
+def GitBlame(path: str, ref: str = "HEAD") -> str:
+    """
+    Show which commit and author last modified each line of a file.
+
+    Args:
+        path: File path relative to /workspace.
+        ref: Commit, branch, or tag to blame from (default HEAD).
+    """
+    return _get("/git/blame", path=path, ref=ref)
+
+
+@mcp.tool()
+def GitBranches(all: bool = False) -> str:
+    """
+    List branches in the remote workspace repository.
+
+    Args:
+        all: Include remote-tracking branches (e.g. origin/main) as well.
+    """
+    try:
+        r = httpx.get(f"{BASE_URL}/git/branches", params={"all": all}, timeout=10)
+        r.raise_for_status()
+        branches = r.json().get("branches", [])
+        lines = []
+        for b in branches:
+            marker = "* " if b["current"] else "  "
+            lines.append(f"{marker}{b['name']:30} {b['hash'][:8]}  {b['subject']}")
+        return "\n".join(lines) if lines else "(no branches)"
+    except httpx.HTTPStatusError as e:
+        return f"ERROR {e.response.status_code}: {e.response.text}"
+    except Exception as e:
+        return f"ERROR: {e}"
+
+
 # ── Resources (workspace files as MCP resources) ──────────────────────────────
 
 @mcp.resource("workspace://CLAUDE.md")

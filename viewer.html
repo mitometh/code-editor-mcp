@@ -1,0 +1,909 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Git Viewer</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/vs2015.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+tailwind.config = {
+  theme: {
+    extend: {
+      colors: {
+        vsc: {
+          editor:   '#1e1e1e',
+          sidebar:  '#252526',
+          activity: '#333333',
+          tabbar:   '#2d2d2d',
+          status:   '#007acc',
+          border:   '#474747',
+          text:     '#d4d4d4',
+          muted:    '#858585',
+          hover:    '#37373d',
+          active:   '#094771',
+          input:    '#3c3c3c',
+        }
+      },
+      fontFamily: {
+        mono: ['"Cascadia Code"', '"JetBrains Mono"', 'Consolas', '"Courier New"', 'monospace'],
+      }
+    }
+  }
+}
+</script>
+<style>
+/* ── Scrollbars ── */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #424242; }
+::-webkit-scrollbar-thumb:hover { background: #555; }
+
+/* ── highlight.js override ── */
+.hljs { background: transparent !important; padding: 0 !important; }
+
+/* ── Shimmer skeleton ── */
+@keyframes shimmer { 0%{background-position:200% center} 100%{background-position:-200% center} }
+.shimmer {
+  background: linear-gradient(90deg,#2a2a2a 25%,#333 50%,#2a2a2a 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.4s ease infinite;
+}
+
+/* ── Spin ── */
+@keyframes spin { to { transform: rotate(360deg); } }
+.spin { animation: spin .65s linear infinite; }
+
+/* ── Activity bar ── */
+.act-btn { position: relative; }
+.act-btn::after {
+  content: attr(data-tip);
+  position: absolute; left: calc(100% + 10px); top: 50%; transform: translateY(-50%);
+  background: #252526; color: #d4d4d4; padding: 4px 10px; font-size: 12px;
+  white-space: nowrap; border: 1px solid #454545; border-radius: 2px;
+  pointer-events: none; opacity: 0; transition: opacity .1s .4s; z-index: 200;
+}
+.act-btn:hover::after { opacity: 1; }
+.act-active { color: #d4d4d4 !important; }
+.act-active .act-bar { display: block !important; }
+
+/* ── Indent guides ── */
+.indent-guide { display: inline-block; width: 14px; flex-shrink: 0; border-left: 1px solid #404040; align-self: stretch; }
+
+/* ── Tree item ── */
+.ti { display: flex; align-items: center; height: 22px; cursor: pointer; user-select: none; padding-right: 8px; }
+.ti:hover .ti-bg { background: #2a2d2e; }
+.ti.ti-sel .ti-bg { background: #094771; }
+.ti-bg { display: flex; align-items: center; flex: 1; height: 100%; gap: 4px; overflow: hidden; }
+.ti-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; font-size: 13px; }
+.ti-badge { font-size: 10px; font-weight: 600; flex-shrink: 0; padding: 0 3px; margin-left: auto; }
+.ti-hidden { display: none !important; }
+
+/* ── Code table ── */
+.code-table { border-collapse: collapse; width: 100%; font-family: 'Cascadia Code','JetBrains Mono',Consolas,monospace; font-size: 14px; line-height: 22px; }
+.code-table tr:hover .ln, .code-table tr:hover .lc { background: #ffffff08; }
+.ln { width: 1%; min-width: 52px; padding: 0 20px 0 24px; text-align: right; color: #858585; white-space: nowrap; font-size: 13px; }
+.lc { padding: 0 24px; white-space: pre; }
+
+/* ── Diff ── */
+.diff-line { display: grid; grid-template-columns: 44px 44px 18px 1fr; font-family: 'Cascadia Code',Consolas,monospace; font-size: 13px; line-height: 20px; }
+.diff-ln { padding: 0 8px; text-align: right; color: #858585; font-size: 12px; user-select: none; }
+.diff-sign { text-align: center; user-select: none; font-weight: 600; }
+.diff-code { padding: 0 12px; white-space: pre; overflow: hidden; }
+.diff-line.add { background: #0e4429; }
+.diff-line.add .diff-code { color: #4ade80; }
+.diff-line.add .diff-sign { color: #4ade80; }
+.diff-line.del { background: #4b1818; }
+.diff-line.del .diff-code { color: #f87171; }
+.diff-line.del .diff-sign { color: #f87171; }
+.diff-line.hunk { background: #0d2137; }
+.diff-line.hunk .diff-code { color: #569cd6; grid-column: 1/-1; padding-left: 8px; }
+
+/* ── Diff file header ── */
+.diff-file { border: 1px solid #474747; border-radius: 0; margin: 0; }
+.diff-file + .diff-file { border-top: none; }
+
+/* ── SCM file row ── */
+.scm-row { display: flex; align-items: center; height: 22px; cursor: pointer; padding: 0 8px; gap: 6px; }
+.scm-row:hover { background: #2a2d2e; }
+.scm-row.scm-sel { background: #094771; }
+
+/* ── Commit row ── */
+.ci-row { display: flex; align-items: center; height: 22px; cursor: pointer; padding: 0 8px; gap: 6px; }
+.ci-row:hover { background: #2a2d2e; }
+.ci-row.ci-sel { background: #094771; }
+
+/* ── Tab ── */
+.tab-item { display: flex; align-items: center; gap: 6px; padding: 0 12px; height: 100%; font-size: 13px; white-space: nowrap; flex-shrink: 0; cursor: pointer; user-select: none; border-right: 1px solid #474747; }
+.tab-x { opacity: 0; width: 16px; height: 16px; border-radius: 3px; display: flex; align-items: center; justify-content: center; font-size: 15px; line-height: 1; flex-shrink: 0; cursor: pointer; }
+.tab-item:hover .tab-x { opacity: .5; }
+.tab-x:hover { opacity: 1 !important; background: #ffffff25; }
+
+/* ── Status bar ── */
+.sb-item { display: flex; align-items: center; gap: 4px; padding: 0 8px; height: 100%; cursor: pointer; }
+.sb-item:hover { background: #ffffff25; }
+
+/* ── Empty state ── */
+.empty-state { display: flex; flex-direction: column; align-items: center; justify-content: center; flex: 1; gap: 10px; color: #858585; }
+</style>
+</head>
+<body class="h-full flex flex-col bg-vsc-editor text-vsc-text overflow-hidden" style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;-webkit-font-smoothing:antialiased">
+
+<!-- ── Main workspace ───────────────────────────────────────────────────────── -->
+<div class="flex flex-1 overflow-hidden min-h-0">
+
+  <!-- ── Activity Bar ────────────────────────────────────────────────────────── -->
+  <div class="flex flex-col items-center flex-shrink-0 py-1" style="width:48px;background:#333;border-right:1px solid #3a3a3a">
+
+    <button class="act-btn relative w-12 h-12 flex items-center justify-center text-vsc-muted hover:text-vsc-text"
+            id="act-explorer" data-tip="Explorer" onclick="setMode('explorer')">
+      <div class="act-bar absolute left-0 inset-y-3 w-[2px] bg-white hidden"></div>
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
+        <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/>
+      </svg>
+    </button>
+
+    <button class="act-btn relative w-12 h-12 flex items-center justify-center text-vsc-muted hover:text-vsc-text"
+            id="act-scm" data-tip="Source Control" onclick="setMode('scm')">
+      <div class="act-bar absolute left-0 inset-y-3 w-[2px] bg-white hidden"></div>
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
+        <circle cx="6" cy="5" r="2.5"/><circle cx="6" cy="19" r="2.5"/><circle cx="18" cy="5" r="2.5"/>
+        <line x1="6" y1="7.5" x2="6" y2="16.5"/><path d="M8.5 5H14a2 2 0 012 2v3"/>
+      </svg>
+    </button>
+
+    <button class="act-btn relative w-12 h-12 flex items-center justify-center text-vsc-muted hover:text-vsc-text"
+            id="act-history" data-tip="Timeline" onclick="setMode('history')">
+      <div class="act-bar absolute left-0 inset-y-3 w-[2px] bg-white hidden"></div>
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
+        <circle cx="12" cy="12" r="9"/><polyline points="12 6 12 12 16 14"/>
+      </svg>
+    </button>
+
+  </div>
+
+  <!-- ── Primary Sidebar ─────────────────────────────────────────────────────── -->
+  <div id="sidebar" class="flex flex-col bg-vsc-sidebar flex-shrink-0 overflow-hidden" style="width:260px;border-right:1px solid #474747">
+
+    <!-- Explorer Panel -->
+    <div id="panel-explorer" class="flex flex-col flex-1 overflow-hidden">
+      <div class="px-5 pt-2 pb-1.5 text-[11px] font-bold tracking-[.08em] uppercase select-none flex-shrink-0" style="color:#bbb">Explorer</div>
+      <div class="px-2 pb-2 flex-shrink-0">
+        <div class="flex items-center gap-2 rounded px-2 py-1" style="background:#3c3c3c">
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" class="text-vsc-muted flex-shrink-0">
+            <path d="M10.68 11.74a6 6 0 0 1-7.922-8.982 6 6 0 0 1 8.982 7.922l3.04 3.04a.749.749 0 0 1-.326 1.275.749.749 0 0 1-.734-.215ZM11.5 7a4.499 4.499 0 1 0-8.997 0A4.499 4.499 0 0 0 11.5 7Z"/>
+          </svg>
+          <input type="text" id="file-search" placeholder="Filter files…"
+            oninput="filterTree(this.value)" autocomplete="off" spellcheck="false"
+            class="bg-transparent outline-none w-full text-[13px] text-vsc-text placeholder-vsc-muted">
+        </div>
+      </div>
+      <div id="file-tree-wrap" class="flex-1 overflow-y-auto"></div>
+    </div>
+
+    <!-- Source Control Panel -->
+    <div id="panel-scm" class="hidden flex-col flex-1 overflow-hidden">
+      <div class="px-5 pt-2 pb-1.5 text-[11px] font-bold tracking-[.08em] uppercase select-none flex-shrink-0 flex items-center justify-between" style="color:#bbb">
+        <span>Source Control</span>
+        <span id="scm-badge" class="normal-case tracking-normal font-semibold text-[10px] text-white px-1.5 py-0.5 rounded-full" style="background:#007acc">0</span>
+      </div>
+      <div id="scm-file-list" class="flex-1 overflow-y-auto text-[13px]"></div>
+    </div>
+
+    <!-- History Panel -->
+    <div id="panel-history" class="hidden flex-col flex-1 overflow-hidden">
+      <div class="px-5 pt-2 pb-1.5 text-[11px] font-bold tracking-[.08em] uppercase select-none flex-shrink-0" style="color:#bbb">Timeline</div>
+      <div id="commits-list" class="flex-1 overflow-y-auto text-[13px]"></div>
+    </div>
+
+  </div>
+
+  <!-- ── Resize Handle ───────────────────────────────────────────────────────── -->
+  <div id="resize-handle" class="flex-shrink-0 cursor-col-resize hover:bg-[#007acc] transition-colors duration-150 relative" style="width:1px;background:#474747">
+    <div class="absolute inset-y-0 -left-1 -right-1"></div>
+  </div>
+
+  <!-- ── Editor ─────────────────────────────────────────────────────────────── -->
+  <div class="flex flex-col flex-1 overflow-hidden min-w-0">
+
+    <!-- Tab bar -->
+    <div class="flex flex-shrink-0 overflow-x-auto" id="tab-bar" style="height:35px;background:#2d2d2d;border-bottom:1px solid #474747">
+      <div id="active-tab" class="tab-item hidden text-vsc-text" style="background:#1e1e1e;border-top:1px solid #007acc;margin-top:-1px">
+        <span id="active-tab-icon" class="flex-shrink-0 text-[13px]"></span>
+        <span id="active-tab-name" class="text-[13px]"></span>
+        <button class="tab-x" onclick="closeActiveFile()" title="Close">×</button>
+      </div>
+      <div id="tab-welcome" class="flex items-center px-4 text-[13px] italic text-vsc-muted select-none">
+        — no file open —
+      </div>
+    </div>
+
+    <!-- Breadcrumb -->
+    <div id="breadcrumb" class="flex items-center flex-shrink-0 px-3 text-[13px] overflow-x-auto whitespace-nowrap select-none" style="height:22px;background:#1e1e1e;border-bottom:1px solid #474747">
+      <span class="text-vsc-muted cursor-pointer hover:text-vsc-text" onclick="setBreadcrumb('')">root</span>
+    </div>
+
+    <!-- Content views -->
+    <div class="flex-1 overflow-hidden flex flex-col min-h-0">
+
+      <!-- Code view -->
+      <div id="view-code" class="flex-1 overflow-auto" style="background:#1e1e1e">
+        <div class="empty-state h-full">
+          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" style="opacity:.2">
+            <path d="M13 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V9z"/><polyline points="13 2 13 9 20 9"/>
+          </svg>
+          <span class="text-[13px]">Open a file from the Explorer</span>
+        </div>
+      </div>
+
+      <!-- SCM diff view -->
+      <div id="view-diff" class="hidden flex-1 overflow-auto" style="background:#1e1e1e">
+        <div class="empty-state h-full">
+          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" style="opacity:.2">
+            <circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="6" r="3"/>
+            <line x1="6" y1="9" x2="6" y2="15"/><line x1="9" y1="6" x2="15" y2="6"/>
+          </svg>
+          <span class="text-[13px]">Select a changed file to view its diff</span>
+        </div>
+      </div>
+
+      <!-- Commit diff view -->
+      <div id="view-commit-diff" class="hidden flex-1 overflow-auto" style="background:#1e1e1e">
+        <div class="empty-state h-full">
+          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" style="opacity:.2">
+            <circle cx="12" cy="12" r="9"/><polyline points="12 6 12 12 16 14"/>
+          </svg>
+          <span class="text-[13px]">Select a commit to view its changes</span>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<!-- ── Status Bar ──────────────────────────────────────────────────────────── -->
+<div class="flex items-center flex-shrink-0 text-white text-[12px]" style="height:22px;background:#007acc">
+  <div class="sb-item" id="status-branch-wrap">
+    <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor">
+      <path d="M5.75 2.5a1.25 1.25 0 1 0 0 2.5 1.25 1.25 0 0 0 0-2.5ZM3 3.75a2.75 2.75 0 0 1 5.5 0v.544c.765.165 1.377.714 1.627 1.431h.873a2.75 2.75 0 1 1 0 1.5h-.873A2.751 2.751 0 0 1 8.5 8.706v1.794a2.75 2.75 0 1 1-1.5 0V8.706A2.751 2.751 0 0 1 3.25 6.5H3V3.75Zm2.75 9a1.25 1.25 0 1 0 0 2.5 1.25 1.25 0 0 0 0-2.5Zm5.5-6.25a1.25 1.25 0 1 0 0 2.5 1.25 1.25 0 0 0 0-2.5Z"/>
+    </svg>
+    <select id="branch-sel" onchange="onBranchChange(this.value)"
+      class="bg-transparent border-none outline-none text-white text-[12px] cursor-pointer" style="appearance:none">
+      <option>HEAD</option>
+    </select>
+  </div>
+  <div class="sb-item" id="status-chip">
+    <svg width="10" height="10" viewBox="0 0 8 8" fill="currentColor" id="status-dot"><circle cx="4" cy="4" r="4"/></svg>
+    <span id="status-text">—</span>
+  </div>
+  <span class="ml-auto"></span>
+  <a href="http://localhost:8000/docs" target="_blank" class="sb-item text-white no-underline">
+    <svg width="11" height="11" viewBox="0 0 16 16" fill="currentColor">
+      <path d="M3.75 2A1.75 1.75 0 002 3.75v8.5c0 .966.784 1.75 1.75 1.75h8.5A1.75 1.75 0 0014 12.25V8.5a.75.75 0 00-1.5 0v3.75a.25.25 0 01-.25.25h-8.5a.25.25 0 01-.25-.25v-8.5a.25.25 0 01.25-.25H7.5a.75.75 0 000-1.5H3.75Zm10.25.75a.75.75 0 00-.75-.75H10a.75.75 0 000 1.5h1.69l-6.22 6.22a.75.75 0 101.06 1.06L12.75 5.31V7a.75.75 0 001.5 0V3z"/>
+    </svg>
+    API docs
+  </a>
+</div>
+
+<script>
+// ── Config ──────────────────────────────────────────────────────────────────
+const API = 'http://localhost:8000';
+let branch = 'HEAD';
+let statusMap = {};
+let currentMode = 'explorer';
+let activeFilePath = null;
+let activeScmPath = null;
+let activeCommitHash = null;
+let allTreePaths = [];
+
+const EXT_LANG = {js:'javascript',mjs:'javascript',cjs:'javascript',ts:'typescript',tsx:'typescript',jsx:'javascript',py:'python',html:'html',css:'css',scss:'css',json:'json',md:'markdown',sh:'bash',bash:'bash',zsh:'bash',yml:'yaml',yaml:'yaml',go:'go',rs:'rust',java:'java',rb:'ruby',php:'php',c:'c',cpp:'cpp',h:'c',cs:'csharp',swift:'swift',kt:'kotlin',lua:'lua',r:'r',sql:'sql',xml:'xml',toml:'toml',ini:'ini',vue:'html',svelte:'html'};
+
+// ── Utilities ────────────────────────────────────────────────────────────────
+const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+const extOf = name => name.includes('.') ? name.split('.').pop().toLowerCase() : '';
+
+async function api(path, opts={}) {
+  const r = await fetch(API + path, opts);
+  if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
+  const ct = r.headers.get('content-type') || '';
+  return ct.includes('json') ? r.json() : r.text();
+}
+
+function spinHtml(msg='Loading…') {
+  return `<div class="empty-state h-full"><div class="w-5 h-5 rounded-full border-2 border-[#424242] border-t-[#007acc] spin"></div><span class="text-[13px]">${msg}</span></div>`;
+}
+
+function skeletonHtml(n=10) {
+  return Array.from({length:n},(_,i)=>`<div class="shimmer mx-3 my-1 rounded" style="height:14px;width:${45+Math.random()*40}%;margin-left:${12+Math.floor(i/4)*14}px"></div>`).join('');
+}
+
+function formatDate(iso) {
+  if (!iso) return '';
+  try {
+    const d = new Date(iso), now = new Date(), ms = now - d, days = Math.floor(ms/86400000);
+    if (days === 0) { const h=Math.floor(ms/3600000); if(h===0){const m=Math.floor(ms/60000);return m<2?'just now':`${m}m ago`;}return `${h}h ago`; }
+    if (days === 1) return 'yesterday';
+    if (days < 7)  return `${days}d ago`;
+    if (days < 30) return `${Math.floor(days/7)}w ago`;
+    if (days < 365)return `${Math.floor(days/30)}mo ago`;
+    return `${Math.floor(days/365)}y ago`;
+  } catch { return iso.slice(0,10); }
+}
+
+function avatarColor(name) {
+  const cols=['#3b82f6','#8b5cf6','#ec4899','#f59e0b','#10b981','#06b6d4','#f97316','#84cc16'];
+  let h=0; for(let i=0;i<(name||'').length;i++) h=(h*31+name.charCodeAt(i))&0xffffffff;
+  return cols[Math.abs(h)%cols.length];
+}
+
+function initials(name) {
+  if(!name) return '?';
+  const p=name.trim().split(/\s+/);
+  return p.length>=2?(p[0][0]+p[p.length-1][0]).toUpperCase():name.slice(0,2).toUpperCase();
+}
+
+// ── File icons ───────────────────────────────────────────────────────────────
+const EXT_ICON = {
+  js:'🟨',mjs:'🟨',cjs:'🟨',ts:'🔷',tsx:'🔷',jsx:'⚛️',
+  py:'🐍',html:'🌐',css:'🎨',scss:'🎨',json:'📋',
+  md:'📝',sh:'⚙️',bash:'⚙️',yml:'⚙️',yaml:'⚙️',
+  go:'🐹',rs:'🦀',java:'☕',rb:'💎',php:'🐘',
+  c:'🔵',cpp:'🔵',h:'🔵',cs:'🔷',
+  dockerfile:'🐳',gitignore:'🔍',lock:'🔒',
+  svg:'🖼',png:'🖼',jpg:'🖼',gif:'🖼',env:'🔐',toml:'📋',
+};
+function fileIcon(name) {
+  const b=name.toLowerCase();
+  if(b==='dockerfile') return '🐳';
+  if(b.startsWith('.')) return EXT_ICON[b.slice(1)]||'📄';
+  return EXT_ICON[extOf(name)]||'📄';
+}
+
+// ── Status colors ────────────────────────────────────────────────────────────
+const STATUS_COLOR = {
+  M:{text:'#e2c08d',bg:'#332600'},
+  A:{text:'#73c991',bg:'#003320'},
+  D:{text:'#f14c4c',bg:'#330000'},
+  R:{text:'#a78bfa',bg:'#1e1035'},
+  '?':{text:'#858585',bg:'#2a2a2a'},
+};
+
+// ── Init ─────────────────────────────────────────────────────────────────────
+async function init() {
+  await Promise.all([loadBranches(), loadStatus()]);
+  setMode('explorer');
+}
+
+// ── Branches ─────────────────────────────────────────────────────────────────
+async function loadBranches() {
+  try {
+    const { branches } = await api('/git/branches');
+    const sel = document.getElementById('branch-sel');
+    sel.innerHTML = branches.map(b=>`<option value="${esc(b.name)}"${b.current?' selected':''}>${esc(b.name)}</option>`).join('');
+    const cur = branches.find(b=>b.current);
+    if (cur) branch = cur.name;
+  } catch {
+    document.getElementById('branch-sel').innerHTML = '<option value="HEAD">HEAD</option>';
+  }
+}
+
+function onBranchChange(val) {
+  branch = val;
+  activeFilePath = null;
+  hideActiveTab();
+  setBreadcrumb('');
+  loadTree();
+  if (currentMode === 'scm') loadScm();
+  if (currentMode === 'history') loadHistory();
+}
+
+// ── Status ───────────────────────────────────────────────────────────────────
+async function loadStatus() {
+  try {
+    const d = await api('/git/status');
+    statusMap = {};
+    d.files.forEach(f => { statusMap[f.path] = f.xy.trim(); });
+    const n = d.files.length;
+    document.getElementById('status-text').textContent = n ? `${n} changed` : 'clean';
+    document.getElementById('status-dot').style.color = n ? '#e2c08d' : '#73c991';
+    document.getElementById('scm-badge').textContent = n;
+  } catch {}
+}
+
+// ── Mode switching ────────────────────────────────────────────────────────────
+function setMode(mode) {
+  currentMode = mode;
+
+  // Activity bar
+  ['explorer','scm','history'].forEach(m => {
+    const btn = document.getElementById(`act-${m}`);
+    btn.classList.toggle('act-active', m === mode);
+  });
+
+  // Sidebar panels
+  document.getElementById('panel-explorer').classList.toggle('hidden', mode !== 'explorer');
+  document.getElementById('panel-explorer').classList.toggle('flex', mode === 'explorer');
+  document.getElementById('panel-scm').classList.toggle('hidden', mode !== 'scm');
+  document.getElementById('panel-scm').classList.toggle('flex', mode === 'scm');
+  document.getElementById('panel-history').classList.toggle('hidden', mode !== 'history');
+  document.getElementById('panel-history').classList.toggle('flex', mode === 'history');
+
+  // Editor views
+  document.getElementById('view-code').classList.toggle('hidden', mode !== 'explorer');
+  document.getElementById('view-code').classList.toggle('flex-1', mode === 'explorer');
+  document.getElementById('view-diff').classList.toggle('hidden', mode !== 'scm');
+  document.getElementById('view-diff').classList.toggle('flex-1', mode === 'scm');
+  document.getElementById('view-commit-diff').classList.toggle('hidden', mode !== 'history');
+  document.getElementById('view-commit-diff').classList.toggle('flex-1', mode === 'history');
+
+  // Load data
+  if (mode === 'explorer' && allTreePaths.length === 0) loadTree();
+  if (mode === 'scm') loadScm();
+  if (mode === 'history') loadHistory();
+}
+
+// ── File Tree ─────────────────────────────────────────────────────────────────
+async function loadTree() {
+  const wrap = document.getElementById('file-tree-wrap');
+  wrap.innerHTML = skeletonHtml(12);
+  try {
+    const { files } = await api(`/git/tree?ref=${encodeURIComponent(branch)}&recursive=true`);
+    allTreePaths = files;
+    renderTree(files);
+  } catch(e) {
+    wrap.innerHTML = `<div class="empty-state h-32 text-[#f87171] text-[13px]">⚠ ${esc(e.message)}</div>`;
+  }
+}
+
+function buildTreeObj(files) {
+  const root = {};
+  for (const path of files) {
+    const parts = path.split('/');
+    let node = root;
+    for (let i=0;i<parts.length-1;i++) { if(!node[parts[i]]) node[parts[i]]={_files:[]}; node=node[parts[i]]; }
+    (node._files=node._files||[]).push({name:parts[parts.length-1],path});
+  }
+  return root;
+}
+
+function renderTree(files) {
+  const tree = buildTreeObj(files);
+  const container = document.getElementById('file-tree-wrap');
+  container.innerHTML = '';
+  renderNode(container, tree, '', 0);
+}
+
+function renderNode(container, node, prefix, depth) {
+  const dirs = Object.keys(node).filter(k=>k!=='_files').sort((a,b)=>a.localeCompare(b));
+  for (const dir of dirs) {
+    const fullPath = prefix ? `${prefix}/${dir}` : dir;
+    const dirEl = document.createElement('div');
+    dirEl.className = 'ti dir';
+    dirEl.style.paddingLeft = (4 + depth*14) + 'px';
+
+    const guides = makeGuides(depth);
+    const bg = document.createElement('div');
+    bg.className = 'ti-bg';
+
+    const arrow = document.createElement('span');
+    arrow.innerHTML = arrowSvg(false);
+    arrow.style.cssText = 'display:flex;align-items:center;flex-shrink:0;width:16px;color:#858585';
+
+    const folderIcon = document.createElement('span');
+    folderIcon.innerHTML = folderSvg(false);
+    folderIcon.style.cssText = 'display:flex;align-items:center;flex-shrink:0';
+
+    const label = document.createElement('span');
+    label.className = 'ti-label text-vsc-text';
+    label.textContent = dir;
+
+    bg.appendChild(arrow); bg.appendChild(folderIcon); bg.appendChild(label);
+    dirEl.appendChild(guides); dirEl.appendChild(bg);
+
+    const childEl = document.createElement('div');
+    childEl.style.display = 'none';
+    renderNode(childEl, node[dir], fullPath, depth+1);
+
+    let open = false;
+    dirEl.onclick = () => {
+      open = !open;
+      childEl.style.display = open ? 'block' : 'none';
+      arrow.innerHTML = arrowSvg(open);
+      folderIcon.innerHTML = folderSvg(open);
+    };
+    container.appendChild(dirEl);
+    container.appendChild(childEl);
+  }
+
+  const fileItems = (node._files||[]).sort((a,b)=>a.name.localeCompare(b.name));
+  for (const { name, path } of fileItems) {
+    const xy = statusMap[path];
+    const el = document.createElement('div');
+    el.className = 'ti';
+    el.dataset.path = path;
+    el.style.paddingLeft = (4 + depth*14) + 'px';
+
+    const guides = makeGuides(depth);
+    const bg = document.createElement('div');
+    bg.className = 'ti-bg';
+
+    const spacer = document.createElement('span');
+    spacer.style.cssText = 'width:16px;flex-shrink:0';
+    bg.appendChild(spacer);
+
+    const icon = document.createElement('span');
+    icon.style.cssText = 'font-size:13px;flex-shrink:0;line-height:1';
+    icon.textContent = fileIcon(name);
+    bg.appendChild(icon);
+
+    const label = document.createElement('span');
+    label.className = 'ti-label';
+    label.style.color = xy ? (STATUS_COLOR[xy[0]]||STATUS_COLOR['?']).text : '#d4d4d4';
+    label.textContent = name;
+    bg.appendChild(label);
+
+    if (xy) {
+      const badge = document.createElement('span');
+      badge.className = 'ti-badge';
+      badge.textContent = xy[0] === '?' ? '?' : xy[0];
+      const sc = STATUS_COLOR[xy[0]]||STATUS_COLOR['?'];
+      badge.style.color = sc.text;
+      bg.appendChild(badge);
+    }
+
+    el.appendChild(guides); el.appendChild(bg);
+    el.onclick = () => openFile(path, el);
+    container.appendChild(el);
+  }
+}
+
+function makeGuides(depth) {
+  const wrap = document.createElement('div');
+  wrap.style.cssText = 'display:flex;align-self:stretch;flex-shrink:0';
+  for (let i=0;i<depth;i++) { const g=document.createElement('div'); g.className='indent-guide'; wrap.appendChild(g); }
+  return wrap;
+}
+
+function arrowSvg(open) {
+  return open
+    ? `<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M4.427 7.427l3.396 3.396a.25.25 0 00.354 0l3.396-3.396A.25.25 0 0011.396 7H4.604a.25.25 0 00-.177.427Z"/></svg>`
+    : `<svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M6.22 3.22a.75.75 0 011.06 0l4.25 4.25a.75.75 0 010 1.06l-4.25 4.25a.75.75 0 01-1.06-1.06L9.94 8 6.22 4.28a.75.75 0 010-1.06z"/></svg>`;
+}
+
+function folderSvg(open) {
+  const col = open ? '#dcb67a' : '#c09553';
+  return open
+    ? `<svg width="14" height="14" viewBox="0 0 16 16" fill="${col}"><path d="M1.75 1A1.75 1.75 0 000 2.75v10.5C0 14.216.784 15 1.75 15h12.5A1.75 1.75 0 0016 13.25v-8.5A1.75 1.75 0 0014.25 3H7.5a.25.25 0 01-.2-.1L6.4 1.7A1.75 1.75 0 004.95 1H1.75z"/></svg>`
+    : `<svg width="14" height="14" viewBox="0 0 16 16" fill="${col}"><path d="M1.75 1A1.75 1.75 0 000 2.75v10.5C0 14.216.784 15 1.75 15h12.5A1.75 1.75 0 0016 13.25v-8.5A1.75 1.75 0 0014.25 3H7.5a.25.25 0 01-.2-.1L6.4 1.7A1.75 1.75 0 004.95 1H1.75z"/></svg>`;
+}
+
+// ── Filter tree ───────────────────────────────────────────────────────────────
+function filterTree(q) {
+  q = q.toLowerCase().trim();
+  const wrap = document.getElementById('file-tree-wrap');
+  wrap.querySelectorAll('.ti').forEach(el => {
+    if (el.classList.contains('dir')) return;
+    const path = el.dataset.path || '';
+    el.classList.toggle('ti-hidden', q !== '' && !path.toLowerCase().includes(q));
+  });
+  if (!q) {
+    wrap.querySelectorAll('div[style*="display: block"]').forEach(el => {
+      if (!el.classList.contains('ti')) el.style.display = 'none';
+    });
+  } else {
+    wrap.querySelectorAll('.ti.dir').forEach(el => {
+      const child = el.nextElementSibling;
+      if (child && !child.classList.contains('ti')) child.style.display = 'block';
+    });
+  }
+}
+
+// ── File viewer ───────────────────────────────────────────────────────────────
+async function openFile(path, el) {
+  document.querySelectorAll('.ti.ti-sel').forEach(e=>e.classList.remove('ti-sel'));
+  if (el) el.classList.add('ti-sel');
+  activeFilePath = path;
+  setBreadcrumb(path);
+
+  // Show tab
+  const name = path.split('/').pop();
+  document.getElementById('active-tab-icon').textContent = fileIcon(name);
+  document.getElementById('active-tab-name').textContent = name;
+  document.getElementById('active-tab').classList.remove('hidden');
+  document.getElementById('tab-welcome').classList.add('hidden');
+
+  const view = document.getElementById('view-code');
+  view.innerHTML = spinHtml();
+  try {
+    const text = await api(`/read_file?file_path=${encodeURIComponent(path)}`);
+    renderCode(view, text, path);
+  } catch(e) {
+    view.innerHTML = `<div class="empty-state h-full text-[#f87171] text-[13px]">Could not load file: ${esc(e.message)}</div>`;
+  }
+}
+
+function closeActiveFile() {
+  activeFilePath = null;
+  document.getElementById('active-tab').classList.add('hidden');
+  document.getElementById('tab-welcome').classList.remove('hidden');
+  setBreadcrumb('');
+  document.getElementById('view-code').innerHTML = `<div class="empty-state h-full">
+    <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" style="opacity:.2">
+      <path d="M13 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V9z"/><polyline points="13 2 13 9 20 9"/>
+    </svg>
+    <span class="text-[13px]">Open a file from the Explorer</span>
+  </div>`;
+  document.querySelectorAll('.ti.ti-sel').forEach(e=>e.classList.remove('ti-sel'));
+}
+
+function renderCode(container, raw, path) {
+  const lines = raw.split('\n');
+  if (lines.at(-1)==='') lines.pop();
+  const plain = lines.map(l=>{ const m=l.match(/^\s*\d+\u2192([\s\S]*)$/); return m?m[1]:l; });
+
+  const ext = extOf(path);
+  const lang = EXT_LANG[ext] || 'plaintext';
+  let highlighted;
+  try { highlighted = hljs.highlight(plain.join('\n'),{language:lang}).value; }
+  catch { highlighted = hljs.highlightAuto(plain.join('\n')).value; }
+
+  const hlines = highlighted.split('\n');
+  const rows = hlines.map((hl,i)=>`<tr><td class="ln">${i+1}</td><td class="lc">${hl||' '}</td></tr>`).join('');
+  container.innerHTML = `<table class="code-table"><tbody>${rows}</tbody></table>`;
+}
+
+function setBreadcrumb(path) {
+  const bc = document.getElementById('breadcrumb');
+  if (!path) { bc.innerHTML = `<span class="text-vsc-muted cursor-pointer hover:text-vsc-text" onclick="setBreadcrumb('')">root</span>`; return; }
+  const parts = path.split('/');
+  const chevron = `<svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor" class="mx-0.5" style="color:#858585"><path d="M6.22 3.22a.75.75 0 011.06 0l4.25 4.25a.75.75 0 010 1.06l-4.25 4.25a.75.75 0 01-1.06-1.06L9.94 8 6.22 4.28a.75.75 0 010-1.06z"/></svg>`;
+  let html = `<span class="text-vsc-muted cursor-pointer hover:text-vsc-text" onclick="setBreadcrumb('')">root</span>`;
+  parts.forEach((p,i)=>{
+    html += chevron;
+    html += i===parts.length-1
+      ? `<span class="text-vsc-text">${esc(p)}</span>`
+      : `<span class="text-vsc-muted cursor-pointer hover:text-vsc-text">${esc(p)}</span>`;
+  });
+  bc.innerHTML = html;
+}
+
+// ── Source Control ────────────────────────────────────────────────────────────
+async function loadScm() {
+  const list = document.getElementById('scm-file-list');
+  list.innerHTML = skeletonHtml(6);
+  try {
+    const d = await api('/git/status');
+    statusMap = {};
+    d.files.forEach(f=>{ statusMap[f.path]=f.xy.trim(); });
+    const n = d.files.length;
+    document.getElementById('scm-badge').textContent = n;
+    document.getElementById('status-text').textContent = n ? `${n} changed` : 'clean';
+
+    if (!n) {
+      list.innerHTML = `<div class="empty-state h-32 text-[13px]">
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="opacity:.3">
+          <polyline points="20 6 9 17 4 12"/>
+        </svg>
+        No changes
+      </div>`;
+      return;
+    }
+
+    list.innerHTML = '';
+    for (const f of d.files) {
+      const xy = f.xy.trim();
+      const sc = STATUS_COLOR[xy[0]]||STATUS_COLOR['?'];
+      const row = document.createElement('div');
+      row.className = 'scm-row';
+      row.dataset.path = f.path;
+      row.innerHTML = `
+        <span style="font-family:monospace;font-size:11px;font-weight:600;color:${sc.text};background:${sc.bg};padding:0 4px;border-radius:2px;flex-shrink:0">${esc(xy)}</span>
+        <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#d4d4d4">${esc(f.path)}</span>
+        ${f.orig_path?`<span style="font-size:11px;color:#858585;flex-shrink:0">← ${esc(f.orig_path)}</span>`:''}
+      `;
+      row.onclick = () => openFileDiff(f.path, row);
+      list.appendChild(row);
+    }
+  } catch(e) {
+    list.innerHTML = `<div class="empty-state h-32 text-[#f87171] text-[13px]">⚠ ${esc(e.message)}</div>`;
+  }
+}
+
+async function openFileDiff(path, rowEl) {
+  document.querySelectorAll('.scm-row.scm-sel').forEach(e=>e.classList.remove('scm-sel'));
+  if (rowEl) rowEl.classList.add('scm-sel');
+  activeScmPath = path;
+  setBreadcrumb(path);
+
+  const view = document.getElementById('view-diff');
+  view.innerHTML = spinHtml();
+  try {
+    // 1. Try unstaged diff
+    const diffText = await api('/git/diff');
+    const fileDiff = extractFileDiff(diffText, path);
+    if (fileDiff && fileDiff.trim()) {
+      view.innerHTML = renderDiffHtml(fileDiff);
+      return;
+    }
+
+    // 2. Try staged diff (file was git-added but not committed)
+    const stagedDiff = await api('/git/diff?staged=true');
+    const stagedFileDiff = extractFileDiff(stagedDiff, path);
+    if (stagedFileDiff && stagedFileDiff.trim()) {
+      view.innerHTML = renderDiffHtml(stagedFileDiff);
+      return;
+    }
+
+    // 3. Untracked new file — render full content as all-additions
+    const raw = await api(`/read_file?file_path=${encodeURIComponent(path)}`);
+    const lines = raw.split('\n');
+    if (lines.at(-1) === '') lines.pop();
+    const plain = lines.map(l => { const m = l.match(/^\s*\d+\u2192([\s\S]*)$/); return m ? m[1] : l; });
+
+    // Build a synthetic diff block
+    const header = `diff --git a/${path} b/${path}\nnew file mode 100644\n--- /dev/null\n+++ b/${path}\n@@ -0,0 +1,${plain.length} @@`;
+    const body = plain.map(l => '+' + l).join('\n');
+    view.innerHTML = renderDiffHtml(header + '\n' + body);
+  } catch(e) {
+    view.innerHTML = `<div class="empty-state h-full text-[#f87171] text-[13px]">⚠ ${esc(e.message)}</div>`;
+  }
+}
+
+function extractFileDiff(text, filePath) {
+  const lines = text.split('\n');
+  let inFile = false, out = [];
+  for (const line of lines) {
+    if (line.startsWith('diff --git')) {
+      if (inFile) break;
+      inFile = line.includes(`b/${filePath}`);
+    }
+    if (inFile) out.push(line);
+  }
+  return out.join('\n');
+}
+
+// ── Timeline / Commits ────────────────────────────────────────────────────────
+async function loadHistory() {
+  const list = document.getElementById('commits-list');
+  list.innerHTML = skeletonHtml(8);
+  try {
+    const { commits } = await api(`/git/log?max_count=50&ref=${encodeURIComponent(branch)}`);
+    if (!commits?.length) {
+      list.innerHTML = `<div class="empty-state h-32 text-[13px]">No commits</div>`;
+      return;
+    }
+    list.innerHTML = '';
+    for (const c of commits) {
+      const row = document.createElement('div');
+      row.className = 'ci-row';
+      row.id = `ci-${c.hash}`;
+      const col = avatarColor(c.author);
+      const ini = initials(c.author);
+      row.innerHTML = `
+        <div style="width:18px;height:18px;border-radius:50%;background:${col};display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:700;color:#fff;flex-shrink:0">${ini}</div>
+        <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#d4d4d4">${esc(c.subject)}</span>
+        <span style="font-size:11px;color:#858585;flex-shrink:0">${formatDate(c.date)}</span>
+      `;
+      row.onclick = () => openCommitDiff(c.hash, c.subject, row);
+      list.appendChild(row);
+    }
+  } catch(e) {
+    list.innerHTML = `<div class="empty-state h-32 text-[#f87171] text-[13px]">⚠ ${esc(e.message)}</div>`;
+  }
+}
+
+async function openCommitDiff(hash, subject, rowEl) {
+  if (activeCommitHash === hash) {
+    // toggle off
+    activeCommitHash = null;
+    document.querySelectorAll('.ci-row.ci-sel').forEach(e=>e.classList.remove('ci-sel'));
+    document.getElementById('view-commit-diff').innerHTML = `<div class="empty-state h-full">
+      <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" style="opacity:.2">
+        <circle cx="12" cy="12" r="9"/><polyline points="12 6 12 12 16 14"/>
+      </svg>
+      <span class="text-[13px]">Select a commit to view its changes</span>
+    </div>`;
+    setBreadcrumb('');
+    return;
+  }
+
+  document.querySelectorAll('.ci-row.ci-sel').forEach(e=>e.classList.remove('ci-sel'));
+  if (rowEl) rowEl.classList.add('ci-sel');
+  activeCommitHash = hash;
+  setBreadcrumb(hash.slice(0,8) + ' — ' + subject);
+
+  const view = document.getElementById('view-commit-diff');
+  view.innerHTML = spinHtml();
+  try {
+    const diffText = await api(`/git/diff/${hash}`);
+    view.innerHTML = (diffText && diffText.trim())
+      ? renderDiffHtml(diffText)
+      : `<div class="empty-state h-full text-[13px]">No changes in this commit</div>`;
+  } catch(e) {
+    view.innerHTML = `<div class="empty-state h-full text-[#f87171] text-[13px]">⚠ ${esc(e.message)}</div>`;
+  }
+}
+
+// ── Diff renderer ─────────────────────────────────────────────────────────────
+function renderDiffHtml(text) {
+  const lines = text.split('\n');
+  let out = '', fh = '', fBody = '', adds = 0, dels = 0, numOld = 0, numNew = 0;
+
+  function flushFile() {
+    if (!fh) return;
+    const addStr = adds > 0 ? `<span style="color:#4ade80;font-family:monospace;font-size:12px">+${adds}</span>` : '';
+    const delStr = dels > 0 ? `<span style="color:#f87171;font-family:monospace;font-size:12px">-${dels}</span>` : '';
+    out += `<div class="diff-file">
+      <div style="display:flex;align-items:center;gap:8px;padding:6px 12px;background:#252526;border-bottom:1px solid #474747">
+        <svg width="13" height="13" viewBox="0 0 16 16" fill="#858585"><path d="M4 1.75C4 .784 4.784 0 5.75 0h5.586c.464 0 .909.184 1.237.513l2.914 2.914c.329.328.513.773.513 1.237v9.586A1.75 1.75 0 0114.25 16h-8.5A1.75 1.75 0 014 14.25Zm1.75-.25a.25.25 0 00-.25.25v12.5c0 .138.112.25.25.25h8.5a.25.25 0 00.25-.25V6h-2.75A1.75 1.75 0 0111.75 4.25V1.5Zm6.75.062V4.25c0 .138.112.25.25.25h2.688Z"/></svg>
+        <span style="font-family:monospace;font-size:13px;color:#d4d4d4;flex:1">${esc(fh)}</span>
+        <span style="display:flex;gap:6px">${addStr}${delStr}</span>
+      </div>
+      <div>${fBody}</div>
+    </div>`;
+    fBody = ''; adds = 0; dels = 0;
+  }
+
+  for (const raw of lines) {
+    if (raw.startsWith('diff --git')) {
+      flushFile();
+      const m = raw.match(/b\/(.+)$/);
+      fh = m ? m[1] : raw; numOld=0; numNew=0; continue;
+    }
+    if (/^(---|\+\+\+|index |new file|deleted file|old mode|new mode|Binary|similarity)/.test(raw)) continue;
+
+    if (raw.startsWith('@@')) {
+      const m = raw.match(/@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+      if (m) { numOld=+m[1]; numNew=+m[2]; }
+      fBody += `<div class="diff-line hunk"><div class="diff-code" style="grid-column:1/-1;padding-left:8px;color:#569cd6">${esc(raw)}</div></div>`;
+      continue;
+    }
+
+    if (raw.startsWith('+')) {
+      adds++;
+      fBody += `<div class="diff-line add"><div class="diff-ln"></div><div class="diff-ln">${numNew++}</div><div class="diff-sign">+</div><div class="diff-code">${esc(raw.slice(1))}</div></div>`;
+    } else if (raw.startsWith('-')) {
+      dels++;
+      fBody += `<div class="diff-line del"><div class="diff-ln">${numOld++}</div><div class="diff-ln"></div><div class="diff-sign">-</div><div class="diff-code">${esc(raw.slice(1))}</div></div>`;
+    } else if (raw !== '') {
+      fBody += `<div class="diff-line"><div class="diff-ln">${numOld++}</div><div class="diff-ln">${numNew++}</div><div class="diff-sign"></div><div class="diff-code">${esc(raw.slice(1)!==undefined?raw.slice(1):raw)}</div></div>`;
+    }
+  }
+  flushFile();
+  return out || `<div class="empty-state h-full text-[13px]">Empty diff</div>`;
+}
+
+// ── Sidebar resize ────────────────────────────────────────────────────────────
+(function initResize() {
+  const handle = document.getElementById('resize-handle');
+  const sidebar = document.getElementById('sidebar');
+  let dragging=false, startX=0, startW=0;
+
+  handle.addEventListener('mousedown', e=>{
+    dragging=true; startX=e.clientX;
+    startW=sidebar.getBoundingClientRect().width;
+    document.body.style.cursor='col-resize';
+    document.body.style.userSelect='none';
+    e.preventDefault();
+  });
+
+  document.addEventListener('mousemove', e=>{
+    if (!dragging) return;
+    const newW = Math.min(500, Math.max(160, startW + (e.clientX - startX)));
+    sidebar.style.width = newW + 'px';
+  });
+
+  document.addEventListener('mouseup', ()=>{
+    if (!dragging) return;
+    dragging=false;
+    document.body.style.cursor='';
+    document.body.style.userSelect='';
+  });
+})();
+
+// ── Boot ──────────────────────────────────────────────────────────────────────
+init();
+</script>
+</body>
+</html>

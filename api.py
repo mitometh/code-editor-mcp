@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 
@@ -18,6 +19,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Remote File Server")
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 
 # ── Path safety ───────────────────────────────────────────────────────────────
@@ -341,6 +343,206 @@ def move_file(req: MoveRequest):
     dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(src), str(dst))
     return {"message": f"Moved {req.source} → {req.destination}"}
+
+
+# ── Git helpers ───────────────────────────────────────────────────────────────
+
+def _git(args: list[str], timeout: int = 30) -> str:
+    """Run a git command in WORKSPACE_DIR; raise HTTPException on failure."""
+    try:
+        r = subprocess.run(
+            ["git"] + args,
+            cwd=str(WORKSPACE_DIR),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        if r.returncode != 0:
+            raise HTTPException(
+                status_code=400,
+                detail=r.stderr.strip() or f"git {args[0]} failed (exit {r.returncode})",
+            )
+        return r.stdout
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=408, detail="Git command timed out")
+    except FileNotFoundError:
+        raise HTTPException(status_code=500, detail="git not found in container")
+
+
+# ── Git status ────────────────────────────────────────────────────────────────
+
+@app.get("/git/status")
+def git_status():
+    """Working tree status — staged, unstaged, and untracked files."""
+    raw = _git(["status", "--porcelain=v1", "--untracked-files=all"])
+    files = []
+    for line in raw.splitlines():
+        if not line:
+            continue
+        xy, path = line[:2], line[3:]
+        # Handle renames: "old -> new"
+        if " -> " in path:
+            old, new = path.split(" -> ", 1)
+            files.append({"xy": xy, "path": new, "orig_path": old})
+        else:
+            files.append({"xy": xy, "path": path})
+    return {"files": files, "summary": _git(["status", "--short"])}
+
+
+# ── Git diff ──────────────────────────────────────────────────────────────────
+
+@app.get("/git/diff", response_class=PlainTextResponse)
+def git_diff(
+    path: str = Query("", description="Restrict diff to this file/directory"),
+    ref: str = Query("", description="Ref to diff against, e.g. HEAD, main, <hash>"),
+    staged: bool = Query(False, description="Show staged (indexed) changes"),
+    stat: bool = Query(False, description="Show diffstat summary instead of full patch"),
+):
+    """Unified diff of changes in the working tree (or staged area)."""
+    args = ["diff"]
+    if stat:
+        args.append("--stat")
+    if staged:
+        args.append("--staged")
+    if ref:
+        args.append(ref)
+    if path:
+        args += ["--", path]
+    return _git(args)
+
+
+# ── Git diff for a specific commit ───────────────────────────────────────────
+
+@app.get("/git/diff/{commit_hash}", response_class=PlainTextResponse)
+def git_diff_commit(commit_hash: str):
+    """Unified diff introduced by a specific commit (commit vs its parent)."""
+    return _git(["diff", f"{commit_hash}^", commit_hash])
+
+
+# ── Git log ───────────────────────────────────────────────────────────────────
+
+@app.get("/git/log")
+def git_log(
+    max_count: int = Query(20, ge=1, le=500),
+    path: str = Query("", description="Only commits touching this path"),
+    ref: str = Query("HEAD", description="Branch, tag, or commit to start from"),
+    oneline: bool = Query(False, description="Compact one-line format"),
+):
+    """Commit history with hash, author, date, and message."""
+    if oneline:
+        fmt = "--oneline"
+    else:
+        fmt = "--pretty=format:%H%x09%an%x09%ai%x09%s"
+
+    args = ["log", fmt, f"--max-count={max_count}", ref]
+    if path:
+        args += ["--", path]
+
+    raw = _git(args)
+    if oneline:
+        return {"log": raw}
+
+    commits = []
+    for line in raw.splitlines():
+        parts = line.split("\t", 3)
+        if len(parts) == 4:
+            commits.append({"hash": parts[0], "author": parts[1], "date": parts[2], "subject": parts[3]})
+    return {"commits": commits}
+
+
+# ── Git tree (ls-tree + untracked) ───────────────────────────────────────────
+
+@app.get("/git/tree")
+def git_tree(
+    path: str = Query("", description="Subdirectory to list"),
+    ref: str = Query("HEAD", description="Commit, branch, or tag"),
+    recursive: bool = Query(True, description="Recurse into subdirectories"),
+):
+    """List all files tracked by git at the given ref, plus untracked and staged-new files."""
+    prefix = path.lstrip("/")
+
+    # Committed files via ls-tree (may fail on empty repos)
+    tracked: set[str] = set()
+    try:
+        args = ["ls-tree", "--name-only"]
+        if recursive:
+            args.append("-r")
+        args.append(ref)
+        if prefix:
+            args.append(prefix)
+        raw = _git(args)
+        tracked = {f for f in raw.splitlines() if f}
+    except HTTPException:
+        pass  # empty repo or bad ref — fall through to status-based listing
+
+    # Untracked (??) and staged-new (A) files via git status
+    # --untracked-files=all expands untracked directories to individual files
+    extra: set[str] = set()
+    try:
+        status_raw = _git(["status", "--porcelain=v1", "--untracked-files=all"])
+        for line in status_raw.splitlines():
+            if not line:
+                continue
+            xy = line[:2]
+            file_path = line[3:].split(" -> ")[-1]  # handle renames
+            # ?? = untracked,  A  = staged new file not yet committed
+            if xy in ("??", "A ") and file_path not in tracked:
+                if not prefix or file_path.startswith(prefix):
+                    extra.add(file_path)
+    except HTTPException:
+        pass
+
+    files = sorted(tracked | extra)
+    return {"files": files, "ref": ref}
+
+
+# ── Git show (file at ref) ────────────────────────────────────────────────────
+
+@app.get("/git/show", response_class=PlainTextResponse)
+def git_show(
+    path: str = Query(..., description="File path relative to /workspace"),
+    ref: str = Query("HEAD", description="Commit, branch, or tag"),
+    line_numbers: bool = Query(True, description="Prefix lines with line numbers"),
+):
+    """Return the content of a file as it exists at a given git ref."""
+    content = _git(["show", f"{ref}:{path.lstrip('/')}"])
+    if not line_numbers:
+        return content
+    lines = content.splitlines(keepends=True)
+    return _cat_n(lines, 1)
+
+
+# ── Git blame ────────────────────────────────────────────────────────────────
+
+@app.get("/git/blame", response_class=PlainTextResponse)
+def git_blame(
+    path: str = Query(..., description="File path relative to /workspace"),
+    ref: str = Query("HEAD"),
+):
+    """Show which commit and author last modified each line of a file."""
+    return _git(["blame", ref, "--", path.lstrip("/")])
+
+
+# ── Git branches ─────────────────────────────────────────────────────────────
+
+@app.get("/git/branches")
+def git_branches(all: bool = Query(False, description="Include remote-tracking branches")):
+    """List local (and optionally remote) branches with their latest commit."""
+    args = ["branch", "-v"]
+    if all:
+        args.append("-a")
+    raw = _git(args)
+    branches = []
+    for line in raw.splitlines():
+        current = line.startswith("*")
+        parts = line.lstrip("* ").split(None, 2)
+        branches.append({
+            "name": parts[0] if parts else "",
+            "hash": parts[1] if len(parts) > 1 else "",
+            "subject": parts[2] if len(parts) > 2 else "",
+            "current": current,
+        })
+    return {"branches": branches}
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

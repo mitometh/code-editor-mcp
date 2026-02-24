@@ -8,8 +8,12 @@ echo "==> Creating workspace at ${WORKSPACE_DIR}"
 mkdir -p "${WORKSPACE_DIR}"
 
 if [ -n "${GITHUB_REPO_URL}" ]; then
-    echo "==> Cloning ${GITHUB_REPO_URL} into ${WORKSPACE_DIR}"
-    git clone "${GITHUB_REPO_URL}" "${WORKSPACE_DIR}"
+    if [ -d "${WORKSPACE_DIR}/.git" ]; then
+        echo "==> Repo already cloned at ${WORKSPACE_DIR}, skipping clone"
+    else
+        echo "==> Cloning ${GITHUB_REPO_URL} into ${WORKSPACE_DIR}"
+        git clone "${GITHUB_REPO_URL}" "${WORKSPACE_DIR}"
+    fi
 else
     echo "==> GITHUB_REPO_URL not set — starting with empty workspace"
 fi
