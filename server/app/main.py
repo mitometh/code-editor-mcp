@@ -7,6 +7,7 @@ from fastapi.responses import FileResponse
 
 from .routes.files import router as files_router
 from .routes.git import router as git_router
+from .routes.sessions import router as sessions_router
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
@@ -15,6 +16,7 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 
 app.include_router(files_router)
 app.include_router(git_router)
+app.include_router(sessions_router)
 
 
 @app.get("/")

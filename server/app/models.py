@@ -76,3 +76,10 @@ class GitResetRequest(BaseModel):
     ref: str = "HEAD"
     mode: str = "mixed"
     paths: list[str] = []
+
+
+class CreateSessionRequest(BaseModel):
+    branch: str
+    user_name: str = "anonymous"
+    create_branch: bool = False
+    start_point: str = ""

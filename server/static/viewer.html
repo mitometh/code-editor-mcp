@@ -264,6 +264,12 @@ tailwind.config = {
 
 <!-- ── Status Bar ──────────────────────────────────────────────────────────── -->
 <div class="flex items-center flex-shrink-0 text-white text-[12px]" style="height:22px;background:#007acc">
+  <div class="sb-item" id="session-btn" onclick="openSessionModal()" title="Manage workspace sessions">
+    <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor">
+      <path d="M5.75 2.5a1.25 1.25 0 1 0 0 2.5 1.25 1.25 0 0 0 0-2.5ZM3 3.75a2.75 2.75 0 0 1 5.5 0v.544c.765.165 1.377.714 1.627 1.431h.873a2.75 2.75 0 1 1 0 1.5h-.873A2.751 2.751 0 0 1 8.5 8.706v1.794a2.75 2.75 0 1 1-1.5 0V8.706A2.751 2.751 0 0 1 3.25 6.5H3V3.75Zm2.75 9a1.25 1.25 0 1 0 0 2.5 1.25 1.25 0 0 0 0-2.5Zm5.5-6.25a1.25 1.25 0 1 0 0 2.5 1.25 1.25 0 0 0 0-2.5Z"/>
+    </svg>
+    <span id="session-label">Default workspace</span>
+  </div>
   <div class="sb-item" id="status-branch-wrap">
     <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor">
       <path d="M5.75 2.5a1.25 1.25 0 1 0 0 2.5 1.25 1.25 0 0 0 0-2.5ZM3 3.75a2.75 2.75 0 0 1 5.5 0v.544c.765.165 1.377.714 1.627 1.431h.873a2.75 2.75 0 1 1 0 1.5h-.873A2.751 2.751 0 0 1 8.5 8.706v1.794a2.75 2.75 0 1 1-1.5 0V8.706A2.751 2.751 0 0 1 3.25 6.5H3V3.75Zm2.75 9a1.25 1.25 0 1 0 0 2.5 1.25 1.25 0 0 0 0-2.5Zm5.5-6.25a1.25 1.25 0 1 0 0 2.5 1.25 1.25 0 0 0 0-2.5Z"/>
@@ -296,6 +302,7 @@ let activeFilePath = null;
 let activeScmPath = null;
 let activeCommitHash = null;
 let allTreePaths = [];
+let currentSession = null;
 
 const EXT_LANG = {js:'javascript',mjs:'javascript',cjs:'javascript',ts:'typescript',tsx:'typescript',jsx:'javascript',py:'python',html:'html',css:'css',scss:'css',json:'json',md:'markdown',sh:'bash',bash:'bash',zsh:'bash',yml:'yaml',yaml:'yaml',go:'go',rs:'rust',java:'java',rb:'ruby',php:'php',c:'c',cpp:'cpp',h:'c',cs:'csharp',swift:'swift',kt:'kotlin',lua:'lua',r:'r',sql:'sql',xml:'xml',toml:'toml',ini:'ini',vue:'html',svelte:'html'};
 
@@ -304,6 +311,10 @@ const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>
 const extOf = name => name.includes('.') ? name.split('.').pop().toLowerCase() : '';
 
 async function api(path, opts={}) {
+  if (currentSession) {
+    const sep = path.includes('?') ? '&' : '?';
+    path = path + sep + `session_id=${currentSession.id}`;
+  }
   const r = await fetch(API + path, opts);
   if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
   const ct = r.headers.get('content-type') || '';
@@ -616,7 +627,7 @@ async function openFile(path, el) {
   const view = document.getElementById('view-code');
   view.innerHTML = spinHtml();
   try {
-    const text = await api(`/read_file?file_path=${encodeURIComponent(path)}`);
+    const text = await api(`/file/read_file?file_path=${encodeURIComponent(path)}`);
     renderCode(view, text, path);
   } catch(e) {
     view.innerHTML = `<div class="empty-state h-full text-[#f87171] text-[13px]">Could not load file: ${esc(e.message)}</div>`;
@@ -736,7 +747,7 @@ async function openFileDiff(path, rowEl) {
     }
 
     // 3. Untracked new file — render full content as all-additions
-    const raw = await api(`/read_file?file_path=${encodeURIComponent(path)}`);
+    const raw = await api(`/file/read_file?file_path=${encodeURIComponent(path)}`);
     const lines = raw.split('\n');
     if (lines.at(-1) === '') lines.pop();
     const plain = lines.map(l => { const m = l.match(/^\s*\d+\u2192([\s\S]*)$/); return m ? m[1] : l; });
@@ -902,8 +913,201 @@ function renderDiffHtml(text) {
   });
 })();
 
+// ── Sessions ──────────────────────────────────────────────────────────────────
+
+function openSessionModal() {
+  const m = document.getElementById('session-modal');
+  m.style.display = 'flex';
+  loadSessionsList();
+  const cbk = document.getElementById('modal-create-branch');
+  cbk.onchange = () => {
+    document.getElementById('modal-start-point-wrap').style.display = cbk.checked ? 'block' : 'none';
+  };
+}
+
+function closeSessionModal() {
+  document.getElementById('session-modal').style.display = 'none';
+  document.getElementById('modal-error').style.display = 'none';
+}
+
+async function loadSessionsList() {
+  const list = document.getElementById('modal-sessions-list');
+  list.innerHTML = '<div class="text-[12px] text-vsc-muted">Loading…</div>';
+  document.getElementById('modal-default-check').style.display = currentSession === null ? 'inline' : 'none';
+
+  try {
+    const { sessions } = await fetch(API + '/sessions').then(r => r.json());
+    if (!sessions.length) {
+      list.innerHTML = '<div class="text-[12px] text-vsc-muted italic px-1">No active sessions</div>';
+      return;
+    }
+    list.innerHTML = '';
+    for (const s of sessions) {
+      const isCurrent = currentSession?.id === s.id;
+      const row = document.createElement('div');
+      row.className = 'flex items-center gap-2 rounded px-2 py-1.5 cursor-pointer text-[13px] mb-1';
+      row.style.cssText = `background:${isCurrent ? '#094771' : '#1e1e1e'};border:1px solid #474747`;
+      row.innerHTML = `
+        <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" style="color:#858585;flex-shrink:0">
+          <path d="M5.75 2.5a1.25 1.25 0 1 0 0 2.5 1.25 1.25 0 0 0 0-2.5ZM3 3.75a2.75 2.75 0 0 1 5.5 0v.544c.765.165 1.377.714 1.627 1.431h.873a2.75 2.75 0 1 1 0 1.5h-.873A2.751 2.751 0 0 1 8.5 8.706v1.794a2.75 2.75 0 1 1-1.5 0V8.706A2.751 2.751 0 0 1 3.25 6.5H3V3.75Zm2.75 9a1.25 1.25 0 1 0 0 2.5 1.25 1.25 0 0 0 0-2.5Zm5.5-6.25a1.25 1.25 0 1 0 0 2.5 1.25 1.25 0 0 0 0-2.5Z"/>
+        </svg>
+        <div style="flex:1;min-width:0">
+          <div style="color:#d4d4d4;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(s.branch)}</div>
+          <div style="font-size:11px;color:#858585">${esc(s.user_name)} · ${s.id.slice(0,8)}</div>
+        </div>
+        ${isCurrent ? '<span style="color:#4ec9b0;font-size:11px;flex-shrink:0">● active</span>' : ''}
+        <button onclick="event.stopPropagation();deleteSession('${s.id}')"
+          style="color:#858585;font-size:18px;line-height:1;flex-shrink:0;background:none;border:none;cursor:pointer"
+          title="Delete session">×</button>
+      `;
+      row.onclick = () => switchSession(s);
+      list.appendChild(row);
+    }
+  } catch(e) {
+    list.innerHTML = `<div style="font-size:12px;color:#f87171">Error: ${esc(e.message)}</div>`;
+  }
+}
+
+function switchSession(session) {
+  currentSession = session;
+  document.getElementById('session-label').textContent = session
+    ? `${session.branch} (${session.user_name})`
+    : 'Default workspace';
+  closeSessionModal();
+  // Reset UI state
+  activeFilePath = null;
+  activeScmPath = null;
+  activeCommitHash = null;
+  allTreePaths = [];
+  document.getElementById('active-tab').classList.add('hidden');
+  document.getElementById('tab-welcome').classList.remove('hidden');
+  document.getElementById('file-search').value = '';
+  setBreadcrumb('');
+  // Reload with new workspace context
+  Promise.all([loadBranches(), loadStatus()]).then(() => setMode(currentMode));
+}
+
+async function createSession() {
+  const branch = document.getElementById('modal-branch').value.trim();
+  const createBranch = document.getElementById('modal-create-branch').checked;
+  const startPoint = document.getElementById('modal-start-point').value.trim();
+  const userName = document.getElementById('modal-username').value.trim() || 'anonymous';
+  const errEl = document.getElementById('modal-error');
+
+  if (!branch) {
+    errEl.textContent = 'Branch name is required';
+    errEl.style.display = 'block';
+    return;
+  }
+  errEl.style.display = 'none';
+
+  try {
+    const session = await fetch(API + '/sessions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ branch, user_name: userName, create_branch: createBranch, start_point: startPoint }),
+    }).then(async r => {
+      if (!r.ok) {
+        const msg = await r.text();
+        throw new Error(msg);
+      }
+      return r.json();
+    });
+    // Clear form
+    document.getElementById('modal-branch').value = '';
+    document.getElementById('modal-username').value = '';
+    document.getElementById('modal-create-branch').checked = false;
+    document.getElementById('modal-start-point').value = '';
+    document.getElementById('modal-start-point-wrap').classList.add('hidden');
+    switchSession(session);
+  } catch(e) {
+    errEl.textContent = `Failed: ${e.message}`;
+    errEl.style.display = 'block';
+  }
+}
+
+async function deleteSession(sessionId) {
+  try {
+    await fetch(API + `/sessions/${sessionId}`, { method: 'DELETE' });
+    if (currentSession?.id === sessionId) {
+      switchSession(null);
+    } else {
+      loadSessionsList();
+    }
+  } catch(e) {
+    alert('Failed to delete session: ' + e.message);
+  }
+}
+
 // ── Boot ──────────────────────────────────────────────────────────────────────
 init();
 </script>
+
+<!-- ── Session Modal ───────────────────────────────────────────────────────── -->
+<div id="session-modal" class="hidden" style="position:fixed;inset:0;z-index:100;display:none;align-items:center;justify-content:center">
+  <div style="position:fixed;inset:0;background:rgba(0,0,0,.6)" onclick="closeSessionModal()"></div>
+  <div style="position:relative;background:#252526;border:1px solid #474747;border-radius:4px;width:440px;max-height:80vh;display:flex;flex-direction:column;box-shadow:0 8px 32px rgba(0,0,0,.5)">
+
+    <!-- Header -->
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 16px;border-bottom:1px solid #474747;flex-shrink:0">
+      <span style="font-size:13px;font-weight:600;color:#d4d4d4">Workspace Sessions</span>
+      <button onclick="closeSessionModal()" style="color:#858585;font-size:20px;line-height:1;background:none;border:none;cursor:pointer;padding:0 2px" title="Close">×</button>
+    </div>
+
+    <!-- Body -->
+    <div style="flex:1;overflow-y:auto;padding:12px 16px">
+
+      <!-- Active sessions -->
+      <div style="font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:#858585;font-weight:600;margin-bottom:6px">Active Sessions</div>
+      <div id="modal-sessions-list" style="margin-bottom:4px"></div>
+
+      <!-- Default workspace -->
+      <div onclick="switchSession(null)"
+        style="display:flex;align-items:center;gap:8px;border-radius:3px;padding:6px 8px;cursor:pointer;background:#1e1e1e;border:1px solid #474747;margin-bottom:16px;font-size:13px;color:#d4d4d4">
+        <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor" style="color:#858585;flex-shrink:0">
+          <path d="M2 2.75C2 1.784 2.784 1 3.75 1h8.5c.966 0 1.75.784 1.75 1.75v11.5A1.75 1.75 0 0 1 12.25 16h-8.5A1.75 1.75 0 0 1 2 14.25Zm1.75-.25a.25.25 0 0 0-.25.25v11.5c0 .138.112.25.25.25h8.5a.25.25 0 0 0 .25-.25V2.75a.25.25 0 0 0-.25-.25Z"/>
+        </svg>
+        <span style="flex:1">Default workspace (no session)</span>
+        <span id="modal-default-check" style="color:#4ec9b0;font-size:11px;display:none">● active</span>
+      </div>
+
+      <!-- New session form -->
+      <div style="font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:#858585;font-weight:600;margin-bottom:8px">New Session</div>
+      <div style="display:flex;flex-direction:column;gap:8px">
+
+        <div>
+          <label style="font-size:12px;color:#858585;display:block;margin-bottom:4px">Branch name</label>
+          <input id="modal-branch" type="text" placeholder="main, feature/xyz, …" autocomplete="off" spellcheck="false"
+            style="width:100%;background:#3c3c3c;border:1px solid #474747;border-radius:3px;padding:5px 8px;font-size:13px;color:#d4d4d4;outline:none;box-sizing:border-box">
+        </div>
+
+        <div style="display:flex;align-items:center;gap:8px">
+          <input id="modal-create-branch" type="checkbox" style="cursor:pointer">
+          <label style="font-size:12px;color:#858585;cursor:pointer" onclick="document.getElementById('modal-create-branch').click()">Create new branch</label>
+        </div>
+
+        <div id="modal-start-point-wrap" style="display:none">
+          <label style="font-size:12px;color:#858585;display:block;margin-bottom:4px">Start point (optional, e.g. main)</label>
+          <input id="modal-start-point" type="text" placeholder="main" autocomplete="off" spellcheck="false"
+            style="width:100%;background:#3c3c3c;border:1px solid #474747;border-radius:3px;padding:5px 8px;font-size:13px;color:#d4d4d4;outline:none;box-sizing:border-box">
+        </div>
+
+        <div>
+          <label style="font-size:12px;color:#858585;display:block;margin-bottom:4px">Your name (optional)</label>
+          <input id="modal-username" type="text" placeholder="anonymous" autocomplete="off" spellcheck="false"
+            style="width:100%;background:#3c3c3c;border:1px solid #474747;border-radius:3px;padding:5px 8px;font-size:13px;color:#d4d4d4;outline:none;box-sizing:border-box">
+        </div>
+
+        <div id="modal-error" style="font-size:12px;color:#f87171;display:none"></div>
+
+        <button onclick="createSession()"
+          style="width:100%;background:#007acc;color:#fff;border:none;border-radius:3px;padding:7px;font-size:13px;font-weight:500;cursor:pointer">
+          Create Session
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
 </body>
 </html>

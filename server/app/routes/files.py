@@ -3,16 +3,29 @@ import shutil
 import subprocess
 import logging
 from datetime import datetime
+from pathlib import Path
+from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import PlainTextResponse
 
 from ..config import WORKSPACE_DIR
 from ..models import BashRequest, EditRequest, GrepRequest, MoveRequest, WriteRequest
+from ..session_manager import get_session as _get_session
 from ..utils import _cat_n, _collect_files, safe_path
 
 router = APIRouter(prefix="/file")
 logger = logging.getLogger(__name__)
+
+
+def _workspace(session_id: Optional[str] = Query(None)) -> Path:
+    """Resolve the active workspace: session worktree or default WORKSPACE_DIR."""
+    if session_id:
+        s = _get_session(session_id)
+        if not s:
+            raise HTTPException(status_code=404, detail=f"Session not found: {session_id}")
+        return Path(s["worktree_path"])
+    return WORKSPACE_DIR
 
 
 # ── Read ──────────────────────────────────────────────────────────────────────
@@ -22,8 +35,9 @@ def read_file(
     file_path: str = Query(...),
     offset: int = Query(1, ge=1, description="1-based line to start reading from"),
     limit: int = Query(0, ge=0, description="Max lines to read (0 = all remaining)"),
+    workspace: Path = Depends(_workspace),
 ):
-    target = safe_path(file_path)
+    target = safe_path(file_path, workspace)
     if not target.exists():
         raise HTTPException(status_code=404, detail=f"File not found: {file_path}")
     if not target.is_file():
@@ -43,8 +57,11 @@ def read_file(
 # ── Write ─────────────────────────────────────────────────────────────────────
 
 @router.post("/write_file")
-def write_file(req: WriteRequest):
-    target = safe_path(req.file_path)
+def write_file(
+    req: WriteRequest,
+    workspace: Path = Depends(_workspace),
+):
+    target = safe_path(req.file_path, workspace)
     logger.info("Write  file_path=%s  ts=%s", req.file_path, datetime.utcnow().isoformat())
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(req.content)
@@ -54,8 +71,11 @@ def write_file(req: WriteRequest):
 # ── Edit ──────────────────────────────────────────────────────────────────────
 
 @router.post("/edit")
-def edit(req: EditRequest):
-    target = safe_path(req.file_path)
+def edit(
+    req: EditRequest,
+    workspace: Path = Depends(_workspace),
+):
+    target = safe_path(req.file_path, workspace)
     if not target.exists():
         raise HTTPException(status_code=404, detail=f"File not found: {req.file_path}")
 
@@ -83,9 +103,10 @@ def edit(req: EditRequest):
 @router.get("/glob")
 def glob_files(
     pattern: str = Query(..., description="Glob pattern e.g. **/*.py"),
-    path: str = Query("", description="Base directory relative to /workspace"),
+    path: str = Query("", description="Base directory relative to workspace root"),
+    workspace: Path = Depends(_workspace),
 ):
-    base = safe_path(path) if path else WORKSPACE_DIR
+    base = safe_path(path, workspace) if path else workspace
     if not base.is_dir():
         raise HTTPException(status_code=400, detail=f"Not a directory: {path}")
     try:
@@ -97,14 +118,17 @@ def glob_files(
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Invalid glob pattern: {e}")
 
-    return {"matches": [str(p.relative_to(WORKSPACE_DIR)) for p in matches]}
+    return {"matches": [str(p.relative_to(workspace)) for p in matches]}
 
 
 # ── Grep ──────────────────────────────────────────────────────────────────────
 
 @router.post("/grep")
-def grep(req: GrepRequest):
-    target = safe_path(req.path) if req.path else WORKSPACE_DIR
+def grep(
+    req: GrepRequest,
+    workspace: Path = Depends(_workspace),
+):
+    target = safe_path(req.path, workspace) if req.path else workspace
 
     flags = re.DOTALL | re.MULTILINE if req.multiline else 0
     if req.case_insensitive:
@@ -122,7 +146,7 @@ def grep(req: GrepRequest):
         for f in files:
             try:
                 if compiled.search(f.read_text(errors="replace")):
-                    hits.append(str(f.relative_to(WORKSPACE_DIR)))
+                    hits.append(str(f.relative_to(workspace)))
             except Exception:
                 continue
             if req.head_limit and len(hits) >= req.head_limit:
@@ -136,7 +160,7 @@ def grep(req: GrepRequest):
             try:
                 cnt = len(compiled.findall(f.read_text(errors="replace")))
                 if cnt:
-                    lines_out.append(f"{f.relative_to(WORKSPACE_DIR)}:{cnt}")
+                    lines_out.append(f"{f.relative_to(workspace)}:{cnt}")
             except Exception:
                 continue
         if req.head_limit:
@@ -154,7 +178,7 @@ def grep(req: GrepRequest):
         except Exception:
             continue
 
-        rel = str(f.relative_to(WORKSPACE_DIR))
+        rel = str(f.relative_to(workspace))
         match_indices = [i for i, ln in enumerate(file_lines) if compiled.search(ln)]
         if not match_indices:
             continue
@@ -197,8 +221,11 @@ def grep(req: GrepRequest):
 # ── LS ────────────────────────────────────────────────────────────────────────
 
 @router.get("/list_directory")
-def list_directory(path: str = Query("", description="Path relative to /workspace")):
-    target = safe_path(path) if path else WORKSPACE_DIR
+def list_directory(
+    path: str = Query("", description="Path relative to workspace root"),
+    workspace: Path = Depends(_workspace),
+):
+    target = safe_path(path, workspace) if path else workspace
     if not target.exists():
         raise HTTPException(status_code=404, detail=f"Not found: {path}")
     if not target.is_dir():
@@ -212,13 +239,16 @@ def list_directory(path: str = Query("", description="Path relative to /workspac
         }
         for e in sorted(target.iterdir())
     ]
-    return {"path": str(target.relative_to(WORKSPACE_DIR)), "entries": entries}
+    return {"path": str(target.relative_to(workspace)), "entries": entries}
 
 
 # ── Bash ──────────────────────────────────────────────────────────────────────
 
 @router.post("/bash")
-def bash(req: BashRequest):
+def bash(
+    req: BashRequest,
+    workspace: Path = Depends(_workspace),
+):
     logger.info("Bash  command=%r  ts=%s", req.command, datetime.utcnow().isoformat())
     timeout_sec = req.timeout / 1000
 
@@ -226,7 +256,7 @@ def bash(req: BashRequest):
         result = subprocess.run(
             req.command,
             shell=True,
-            cwd=str(WORKSPACE_DIR),
+            cwd=str(workspace),
             capture_output=True,
             text=True,
             timeout=timeout_sec,
@@ -244,8 +274,11 @@ def bash(req: BashRequest):
 # ── DeleteFile ────────────────────────────────────────────────────────────────
 
 @router.delete("/delete_file")
-def delete_file(file_path: str = Query(...)):
-    target = safe_path(file_path)
+def delete_file(
+    file_path: str = Query(...),
+    workspace: Path = Depends(_workspace),
+):
+    target = safe_path(file_path, workspace)
     logger.info("DeleteFile  file_path=%s  ts=%s", file_path, datetime.utcnow().isoformat())
     if not target.exists():
         raise HTTPException(status_code=404, detail=f"Not found: {file_path}")
@@ -259,9 +292,12 @@ def delete_file(file_path: str = Query(...)):
 # ── MoveFile ──────────────────────────────────────────────────────────────────
 
 @router.post("/move_file")
-def move_file(req: MoveRequest):
-    src = safe_path(req.source)
-    dst = safe_path(req.destination)
+def move_file(
+    req: MoveRequest,
+    workspace: Path = Depends(_workspace),
+):
+    src = safe_path(req.source, workspace)
+    dst = safe_path(req.destination, workspace)
     if not src.exists():
         raise HTTPException(status_code=404, detail=f"Source not found: {req.source}")
     dst.parent.mkdir(parents=True, exist_ok=True)

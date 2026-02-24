@@ -1,14 +1,16 @@
 from pathlib import Path
+from typing import Optional
 
 from fastapi import HTTPException
 
 from .config import WORKSPACE_DIR
 
 
-def safe_path(raw: str) -> Path:
-    """Resolve path and ensure it stays within WORKSPACE_DIR."""
-    resolved = (WORKSPACE_DIR / raw.lstrip("/")).resolve()
-    if not str(resolved).startswith(str(WORKSPACE_DIR)):
+def safe_path(raw: str, workspace: Optional[Path] = None) -> Path:
+    """Resolve path and ensure it stays within the workspace root."""
+    base = workspace or WORKSPACE_DIR
+    resolved = (base / raw.lstrip("/")).resolve()
+    if not str(resolved).startswith(str(base)):
         raise HTTPException(status_code=400, detail=f"Path '{raw}' escapes workspace root")
     return resolved
 
